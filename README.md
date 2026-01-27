@@ -5,7 +5,7 @@ Fast workspace tools for multi-repo management.
 ## Install
 
 ```bash
-pip install fastws
+pip install fastws-cli
 ```
 
 ## Setup
