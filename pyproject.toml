@@ -33,5 +33,8 @@ ws_pull = "fastws.core:ws_pull_cli"
 ws_status = "fastws.core:ws_status_cli"
 ws_branches = "fastws.core:ws_branches_cli"
 
+[project.urls]
+Homepage = "https://github.com/AnswerDotAI/fastws"
+
 [tool.setuptools.dynamic]
 version = { attr = "fastws.__version__" }
