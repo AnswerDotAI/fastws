@@ -3,7 +3,7 @@ requires = ["setuptools>=68", "wheel"]
 build-backend = "setuptools.build_meta"
 
 [project]
-name = "fastws"
+name = "fastws-cli"
 dynamic = ["version"]
 description = "Fast workspace tools for multi-repo management"
 readme = "README.md"
@@ -35,6 +35,3 @@ ws_branches = "fastws.core:ws_branches_cli"
 
 [tool.setuptools.dynamic]
 version = { attr = "fastws.__version__" }
-
-[tool.fastship]
-branch = "main"
