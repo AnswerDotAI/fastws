@@ -1,0 +1,40 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "fastws"
+dynamic = ["version"]
+description = "Fast workspace tools for multi-repo management"
+readme = "README.md"
+requires-python = ">=3.10"
+license = { text = "Apache-2.0" }
+authors = [{ name = "Jeremy Howard" }]
+classifiers = [
+  "Programming Language :: Python :: 3",
+  "Programming Language :: Python :: 3 :: Only",
+]
+
+dependencies = [
+  "fastcore>=1.5.29",
+  "fastgit>=0.0.2",
+]
+
+[project.optional-dependencies]
+dev = [
+  "fastship",
+  "build",
+  "twine",
+]
+
+[project.scripts]
+ws_clone = "fastws.core:ws_clone_cli"
+ws_pull = "fastws.core:ws_pull_cli"
+ws_status = "fastws.core:ws_status_cli"
+ws_branches = "fastws.core:ws_branches_cli"
+
+[tool.setuptools.dynamic]
+version = { attr = "fastws.__version__" }
+
+[tool.fastship]
+branch = "main"
