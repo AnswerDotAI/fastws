@@ -28,10 +28,10 @@ dev = [
 ]
 
 [project.scripts]
-ws_clone = "fastws.core:ws_clone_cli"
-ws_pull = "fastws.core:ws_pull_cli"
-ws_status = "fastws.core:ws_status_cli"
-ws_branches = "fastws.core:ws_branches_cli"
+ws-clone = "fastws.core:ws_clone_cli"
+ws-pull = "fastws.core:ws_pull_cli"
+ws-status = "fastws.core:ws_status_cli"
+ws-branches = "fastws.core:ws_branches_cli"
 
 [project.urls]
 Homepage = "https://github.com/AnswerDotAI/fastws"
