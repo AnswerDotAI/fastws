@@ -21,37 +21,37 @@ AnswerDotAI/fastws
 
 ## Commands
 
-### `ws_clone`
+### `ws-clone`
 
 Clone all repos from your repos file:
 
 ```bash
-ws_clone
-ws_clone --repos-file myrepos.txt
-ws_clone --workers 8
+ws-clone
+ws-clone --repos-file myrepos.txt
+ws-clone --workers 8
 ```
 
-### `ws_pull`
+### `ws-pull`
 
 Pull updates for all repos (parallel):
 
 ```bash
-ws_pull
+ws-pull
 ```
 
-### `ws_status`
+### `ws-status`
 
 Show uncommitted changes and unpushed commits:
 
 ```bash
-ws_status
+ws-status
 ```
 
-### `ws_branches`
+### `ws-branches`
 
 Check if all repos are on the expected branch:
 
 ```bash
-ws_branches
-ws_branches --expected develop
+ws-branches
+ws-branches --expected develop
 ```
