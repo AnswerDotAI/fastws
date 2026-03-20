@@ -1,15 +1,17 @@
 "Fast workspace tools for multi-repo management."
 
-from __future__ import annotations
+__all__ = ["ws_clone", "ws_clone_cli", "ws_pull", "ws_pull_cli", "ws_status", "ws_status_cli", "ws_branches", "ws_branches_cli",
+    "ws_sync", "ws_sync_cli", "ws_add", "ws_add_cli"]
 
-__all__ = ["ws_clone", "ws_clone_cli", "ws_pull", "ws_pull_cli", "ws_status", "ws_status_cli", "ws_branches", "ws_branches_cli"]
-
-import subprocess
+import ast, fnmatch, os, re, shutil, subprocess
 from pathlib import Path
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
 from fastcore.script import call_parse
 from fastgit import Git
+
+try: import tomllib
+except ModuleNotFoundError: import tomli as tomllib
 
 def _load_repos(repos_file: str = "repos.txt") -> list[str]:
     p = Path(repos_file)
@@ -17,6 +19,192 @@ def _load_repos(repos_file: str = "repos.txt") -> list[str]:
     return [line.strip() for line in p.read_text().splitlines() if line.strip() and not line.startswith("#")]
 
 def _repo_dir(repo: str) -> str: return repo.split("/")[-1]
+
+def _resolve_path(root: Path, path: str) -> Path:
+    p = Path(path)
+    return p if p.is_absolute() else root/p
+
+def _repo_key(repo: str) -> str: return repo.strip().rstrip("/").removesuffix(".git").casefold()
+
+def _pkg_key(name: str) -> str: return name.casefold()
+
+def _dep_key(dep: str) -> str:
+    dep = dep.split(";", 1)[0].strip()
+    dep = re.split(r"[\s<>=!~]", dep, maxsplit=1)[0]
+    return dep.split("[", 1)[0].casefold()
+
+def _ws_root(workspace: str = "", repos_file: str = "repos.txt", pyproject_file: str = "pyproject.toml",
+    template_file: str = "pyproject.tmpl") -> Path:
+    if workspace: return Path(workspace).expanduser().resolve()
+    for env_name in "UV_PROJECT_ENVIRONMENT","VIRTUAL_ENV":
+        if not (env := os.environ.get(env_name)): continue
+        root = Path(env).expanduser().resolve().parent
+        if any((_resolve_path(root, repos_file).exists(), _resolve_path(root, pyproject_file).exists(), _resolve_path(root, template_file).exists())):
+            return root
+    return Path.cwd().resolve()
+
+def _parse_github_repo(remote: str) -> str|None:
+    m = re.search(r"github\.com[:/](?P<owner>[^/]+)/(?P<repo>[^/]+?)(?:\.git)?/?$", remote.strip())
+    return f"{m['owner']}/{m['repo']}" if m else None
+
+def _normalize_repo(repo: str) -> str:
+    repo = repo.strip().rstrip("/").removesuffix(".git")
+    if parsed := _parse_github_repo(repo): return parsed
+    if re.fullmatch(r"[^/\s]+/[^/\s]+", repo): return repo
+    raise SystemExit(f"Invalid repo: {repo}. Expected owner/repo or GitHub URL")
+
+def _ws_cfg(root: Path):
+    pyproject = root/"pyproject.toml"
+    if not pyproject.exists(): return ["./*"], []
+    try: data = tomllib.loads(pyproject.read_text())
+    except tomllib.TOMLDecodeError: return ["./*"], []
+    ws = data.get("tool", {}).get("uv", {}).get("workspace", {})
+    members = ws.get("members") or ["./*"]
+    exclude = ws.get("exclude") or []
+    return members, exclude
+
+def _matches_ws(name: str, pattern: str) -> bool:
+    pattern = pattern.strip()
+    return any(fnmatch.fnmatch(candidate, normalized) for candidate in (name, f"./{name}") for normalized in (pattern, pattern.removeprefix("./")))
+
+def _is_ws_dir(d: Path, members, exclude) -> bool:
+    return d.is_dir() and not d.name.startswith(".") and any(_matches_ws(d.name, o) for o in members) and not any(_matches_ws(d.name, o) for o in exclude)
+
+def _ws_dirs(root: Path) -> list[Path]:
+    members, exclude = _ws_cfg(root)
+    return [d for d in sorted(root.iterdir()) if _is_ws_dir(d, members, exclude)]
+
+def _discover_ws_repos(root: Path) -> list[str]:
+    repos = []
+    for d in (o for o in _ws_dirs(root) if (o/'.git').exists()):
+        try: res = subprocess.run(["git", "-C", str(d), "remote", "get-url", "origin"], check=True, capture_output=True, text=True)
+        except subprocess.CalledProcessError: continue
+        if repo := _parse_github_repo(res.stdout): repos.append(repo)
+    return repos
+
+def _update_repos_file(repos_path: Path, repos: list[str]) -> list[str]:
+    existing = _load_repos(repos_path) if repos_path.exists() else []
+    seen = {_repo_key(repo) for repo in existing}
+    missing = []
+    for repo in repos:
+        if (key := _repo_key(repo)) in seen: continue
+        seen.add(key)
+        missing.append(repo)
+    if not missing: return []
+    content = repos_path.read_text() if repos_path.exists() else ""
+    if content and not content.endswith("\n"): content += "\n"
+    repos_path.write_text(content + "\n".join(missing) + "\n")
+    return missing
+
+def _read_pyproject_name(path: Path) -> str|None:
+    try: data = tomllib.loads(path.read_text())
+    except tomllib.TOMLDecodeError:
+        print(f"Skipping invalid TOML: {path}")
+        return None
+    name = data.get("project", {}).get("name")
+    return name if isinstance(name, str) and name and "{" not in name and "}" not in name else None
+
+def _ws_projects(root: Path) -> list[str]:
+    return [name for d in (o for o in _ws_dirs(root) if (o/"pyproject.toml").exists())
+        if (name := _read_pyproject_name(d/"pyproject.toml"))]
+
+def _table_span(content: str, name: str) -> tuple[int,int]|None:
+    m = re.search(rf"(?m)^\[{re.escape(name)}\]\s*$", content)
+    if not m: return None
+    n = re.search(r"(?m)^\[", content[m.end():])
+    end = m.end()+n.start() if n else len(content)
+    return m.start(), end
+
+def _replace_table(content: str, name: str, body: str) -> str:
+    table = f"[{name}]\n{body.rstrip()}\n\n"
+    if not (span := _table_span(content, name)): return content.rstrip() + "\n\n" + table
+    start,end = span
+    return content[:start] + table + content[end:]
+
+def _find_array_end(content: str, start: int) -> int:
+    depth = 0
+    in_str = escaped = False
+    for i,ch in enumerate(content[start:], start):
+        if in_str:
+            if escaped: escaped = False
+            elif ch == "\\": escaped = True
+            elif ch == '"': in_str = False
+            continue
+        if ch == '"': in_str = True
+        elif ch == "[": depth += 1
+        elif ch == "]":
+            depth -= 1
+            if depth == 0: return i
+    raise ValueError("Unterminated TOML array")
+
+def _replace_project_dependencies(content: str, deps: list[str]) -> str:
+    if not (span := _table_span(content, "project")): raise SystemExit("Missing [project] table in pyproject.toml")
+    start,end = span
+    section = content[start:end]
+    dep_block = "dependencies = [\n" + "".join(f'    "{dep}",\n' for dep in deps) + "]"
+    if m := re.search(r"(?m)^dependencies\s*=\s*\[", section):
+        arr_start = m.end()-1
+        arr_end = _find_array_end(section, arr_start)
+        section = section[:m.start()] + dep_block + section[arr_end+1:]
+    else: section = section.rstrip() + "\n" + dep_block + "\n"
+    return content[:start] + section + content[end:]
+
+def _sync_ws_pyproject(pyproject_path: Path, template_path: Path, projects: list[str]) -> list[str]:
+    if not pyproject_path.exists():
+        if not template_path.exists(): raise SystemExit(f"File not found: {template_path}")
+        shutil.copyfile(template_path, pyproject_path)
+    content = pyproject_path.read_text()
+    data = tomllib.loads(content)
+    sources = dict(data.get("tool", {}).get("uv", {}).get("sources", {}))
+    source_keys = {_pkg_key(proj) for proj in sources}
+    missing = [proj for proj in projects if _pkg_key(proj) not in source_keys]
+    if not missing: return []
+    for proj in missing: sources[proj] = {"workspace": True}
+    deps = list(data.get("project", {}).get("dependencies", []))
+    dep_keys = {_dep_key(dep) for dep in deps}
+    for proj in missing:
+        if _pkg_key(proj) in dep_keys: continue
+        deps.append(proj)
+        dep_keys.add(_pkg_key(proj))
+    source_lines = "\n".join(f"{proj} = {{ workspace = true }}" for proj in sources)
+    content = _replace_table(content, "tool.uv.sources", source_lines)
+    content = _replace_project_dependencies(content, deps)
+    pyproject_path.write_text(content)
+    return missing
+
+def _editable_mapping(path: Path) -> dict[str,str]:
+    tree = ast.parse(path.read_text(), filename=str(path))
+    for node in tree.body:
+        if isinstance(node, ast.Assign) and any(isinstance(o, ast.Name) and o.id == "MAPPING" for o in node.targets):
+            data = ast.literal_eval(node.value)
+            if isinstance(data, dict): return {str(k): str(v) for k,v in data.items()}
+        if isinstance(node, ast.AnnAssign) and isinstance(node.target, ast.Name) and node.target.id == "MAPPING":
+            data = ast.literal_eval(node.value)
+            if isinstance(data, dict): return {str(k): str(v) for k,v in data.items()}
+    return {}
+
+def _site_packages(root: Path) -> Path|None:
+    envs = []
+    if uv_env := os.environ.get("UV_PROJECT_ENVIRONMENT"): envs.append(Path(uv_env))
+    envs.append(root/".venv")
+    if virtual_env := os.environ.get("VIRTUAL_ENV"): envs.append(Path(virtual_env))
+    for env in envs:
+        candidates = sorted(env.glob("lib/python*/site-packages")) + sorted(env.glob("Lib/site-packages"))
+        if candidates: return candidates[0]
+    return None
+
+def _write_pyright_pth_files(root: Path) -> list[Path]:
+    site = _site_packages(root)
+    if not site:
+        print("No site-packages directory found for editable Pyright paths")
+        return []
+    created = []
+    for finder in sorted(site.glob("__editable__*_finder.py")):
+        for pkg,path in _editable_mapping(finder).items():
+            pth = site/f"_pyright_editable_{pkg}.pth"
+            pth.write_text(str(Path(path).parent) + "\n")
+            created.append(pth)
+    return created
 
 def _clone_one(repo: str) -> str:
     d = _repo_dir(repo)
@@ -113,3 +301,55 @@ def ws_branches_cli(
     repos_file: str = "repos.txt",  # File containing repo list
     expected: str = "main",  # Expected branch name
 ): ws_branches(repos_file, expected)
+
+def ws_sync(
+    workspace: str = "",  # Workspace root; defaults to active venv parent when available
+    repos_file: str = "repos.txt",  # Repo list to update from local git remotes
+    pyproject_file: str = "pyproject.toml",  # Workspace pyproject to update
+    template_file: str = "pyproject.tmpl",  # Template copied when pyproject.toml is missing
+):
+    "Sync workspace metadata, run uv sync -U, and refresh Pyright editable paths."
+    root = _ws_root(workspace, repos_file, pyproject_file, template_file)
+    repos_path = _resolve_path(root, repos_file)
+    pyproject_path = _resolve_path(root, pyproject_file)
+    template_path = _resolve_path(root, template_file)
+
+    if missing_repos := _update_repos_file(repos_path, _discover_ws_repos(root)): print(f"Added repos: {', '.join(missing_repos)}")
+
+    if missing_projects := _sync_ws_pyproject(pyproject_path, template_path, _ws_projects(root)): print(f"Added workspace projects: {', '.join(missing_projects)}")
+
+    subprocess.run(["uv", "sync", "-U"], check=True, cwd=root)
+    _write_pyright_pth_files(root)
+
+@call_parse
+def ws_sync_cli(
+    workspace: str = "",  # Workspace root; defaults to active venv parent when available
+    repos_file: str = "repos.txt",  # Repo list to update from local git remotes
+    pyproject_file: str = "pyproject.toml",  # Workspace pyproject to update
+    template_file: str = "pyproject.tmpl",  # Template copied when pyproject.toml is missing
+): ws_sync(workspace, repos_file, pyproject_file, template_file)
+
+def ws_add(
+    repo: str,  # Repo to add, e.g. AnswerDotAI/fastws
+    workspace: str = "",  # Workspace root; defaults to active venv parent when available
+    repos_file: str = "repos.txt",  # Repo list to update
+    pyproject_file: str = "pyproject.toml",  # Workspace pyproject to update
+    template_file: str = "pyproject.tmpl",  # Template copied when pyproject.toml is missing
+):
+    "Add a repo to repos.txt and then run ws-sync."
+    root = _ws_root(workspace, repos_file, pyproject_file, template_file)
+    repos_path = _resolve_path(root, repos_file)
+    repo = _normalize_repo(repo)
+    added = _update_repos_file(repos_path, [repo])
+    if added: print(f"Added repo: {repo}")
+    else: print(f"Repo already present: {repo}")
+    ws_sync(str(root), repos_file, pyproject_file, template_file)
+
+@call_parse
+def ws_add_cli(
+    repo: str,  # Repo to add, e.g. AnswerDotAI/fastws
+    workspace: str = "",  # Workspace root; defaults to active venv parent when available
+    repos_file: str = "repos.txt",  # Repo list to update
+    pyproject_file: str = "pyproject.toml",  # Workspace pyproject to update
+    template_file: str = "pyproject.tmpl",  # Template copied when pyproject.toml is missing
+): ws_add(repo, workspace, repos_file, pyproject_file, template_file)

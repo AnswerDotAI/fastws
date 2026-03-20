@@ -55,3 +55,23 @@ Check if all repos are on the expected branch:
 ws-branches
 ws-branches --expected develop
 ```
+
+### `ws-sync`
+
+Sync the workspace metadata, install updates, and refresh Pyright editable paths.
+By default it uses the active venv parent as the workspace root, so you do not need to `cd` first:
+It respects `tool.uv.workspace.members` and `exclude` when scanning local projects.
+
+```bash
+ws-sync
+ws-sync --workspace ~/aai-ws
+```
+
+### `ws-add`
+
+Add a repo to `repos.txt`, then run `ws-sync`:
+
+```bash
+ws-add AnswerDotAI/fastws
+ws-add answerdotai/fastws
+```
