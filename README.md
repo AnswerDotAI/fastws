@@ -45,6 +45,7 @@ Show uncommitted changes and unpushed commits:
 
 ```bash
 ws-status
+ws-status --branches
 ```
 
 ### `ws-branches`

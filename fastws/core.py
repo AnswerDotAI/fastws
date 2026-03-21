@@ -254,8 +254,9 @@ def ws_pull_cli(
 
 def ws_status(
     repos_file: str = "repos.txt",  # File containing repo list
+    branches: bool = False,  # Show unpushed commit details
 ):
-    "Show uncommitted changes and unpushed commits across repos."
+    "Show uncommitted changes and optionally unpushed commit details across repos."
     repos = _load_repos(repos_file)
     for repo in repos:
         d = _repo_dir(repo)
@@ -265,18 +266,22 @@ def ws_status(
         changes = g.status('-s') or ""
         if isinstance(changes, list): changes = "\n".join(changes)
         unpushed = ""
-        try: unpushed = g.log('--branches', '--not', '--remotes', format='%h %s') or ""
+        try:
+            if branches: unpushed = g.log('--branches', '--not', '--remotes', format='%h %s') or ""
+            elif (branch := g.branch(show_current=True).strip()) in ('main', 'master'):
+                unpushed = g.log('@{upstream}..HEAD', '-1', format='%h %s') or ""
         except Exception: pass
         if isinstance(unpushed, list): unpushed = "\n".join(unpushed)
         if changes or unpushed:
             print(f"\n=== {d} ===")
             if changes: print(changes)
-            if unpushed: print(unpushed)
+            if unpushed: print(unpushed if branches else "unpushed commits")
 
 @call_parse
 def ws_status_cli(
     repos_file: str = "repos.txt",  # File containing repo list
-): ws_status(repos_file)
+    branches: bool = False,  # Show unpushed commit details
+): ws_status(repos_file, branches)
 
 def ws_branches(
     repos_file: str = "repos.txt",  # File containing repo list

@@ -166,3 +166,62 @@ def test_ws_add_updates_repos_then_runs_sync(tmp_path, monkeypatch):
 
     assert (tmp_path/"repos.txt").read_text() == "AnswerDotAI/existing\nanswerdotai/fastws\n"
     assert calls == [(str(tmp_path), "repos.txt", "pyproject.toml", "pyproject.tmpl")]
+
+
+def test_ws_status_summarizes_unpushed_commits_by_default(tmp_path, monkeypatch, capsys):
+    (tmp_path/"repo1").mkdir()
+
+    class FakeGit:
+        exists = True
+        def __init__(self, d): pass
+        def branch(self, **kwargs): return "main"
+        def status(self, *args): return ""
+        def log(self, *args, **kwargs): return "abc first commit"
+
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr(core, "_load_repos", lambda repos_file="repos.txt": ["AnswerDotAI/repo1"])
+    monkeypatch.setattr(core, "Git", FakeGit)
+
+    core.ws_status()
+    out = capsys.readouterr().out
+
+    assert "unpushed commits" in out
+    assert "abc first commit" not in out
+
+
+def test_ws_status_ignores_unpushed_commits_off_main_by_default(tmp_path, monkeypatch, capsys):
+    (tmp_path/"repo1").mkdir()
+
+    class FakeGit:
+        exists = True
+        def __init__(self, d): pass
+        def branch(self, **kwargs): return "feature"
+        def status(self, *args): return ""
+        def log(self, *args, **kwargs): return "abc first commit"
+
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr(core, "_load_repos", lambda repos_file="repos.txt": ["AnswerDotAI/repo1"])
+    monkeypatch.setattr(core, "Git", FakeGit)
+
+    core.ws_status()
+
+    assert capsys.readouterr().out == ""
+
+
+def test_ws_status_shows_unpushed_commits_with_branches_flag(tmp_path, monkeypatch, capsys):
+    (tmp_path/"repo1").mkdir()
+
+    class FakeGit:
+        exists = True
+        def __init__(self, d): pass
+        def branch(self, **kwargs): return "feature"
+        def status(self, *args): return ""
+        def log(self, *args, **kwargs): return "abc first commit"
+
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr(core, "_load_repos", lambda repos_file="repos.txt": ["AnswerDotAI/repo1"])
+    monkeypatch.setattr(core, "Git", FakeGit)
+
+    core.ws_status(branches=True)
+
+    assert "abc first commit" in capsys.readouterr().out
