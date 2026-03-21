@@ -1,5 +1,3 @@
-from pathlib import Path
-
 import fastws.core as core
 
 
@@ -98,6 +96,9 @@ def test_ws_sync_updates_workspace_and_runs_uv(tmp_path, monkeypatch):
         if cmd[:5] == ["git", "-C", str(repo), "remote", "get-url"]:
             class Res: stdout = "git@github.com:AnswerDotAI/repo1.git\n"
             return Res()
+        if cmd[:4] == ["git", "-C", str(repo), "pull"]:
+            class Res: stdout = ""
+            return Res()
         if cmd == ["uv", "sync", "-U"]:
             class Res: stdout = ""
             return Res()
@@ -112,6 +113,7 @@ def test_ws_sync_updates_workspace_and_runs_uv(tmp_path, monkeypatch):
     assert 'newpkg = { workspace = true }' in pyproject
     assert '"newpkg"' in pyproject
     assert (site/"_pyright_editable_newpkg.pth").read_text() == "/tmp/ws/src/newpkg\n"
+    assert next(i for i,(cmd,_) in enumerate(calls) if cmd[:4] == ["git", "-C", str(repo), "pull"]) < next(i for i,(cmd,_) in enumerate(calls) if cmd == ["uv", "sync", "-U"])
     assert any(cmd == ["uv", "sync", "-U"] and kwargs["cwd"] == tmp_path for cmd,kwargs in calls)
 
 
@@ -138,6 +140,9 @@ def test_ws_sync_uses_active_venv_parent_by_default(tmp_path, monkeypatch):
         if cmd[:5] == ["git", "-C", str(repo), "remote", "get-url"]:
             class Res: stdout = "git@github.com:AnswerDotAI/repo1.git\n"
             return Res()
+        if cmd[:4] == ["git", "-C", str(repo), "pull"]:
+            class Res: stdout = ""
+            return Res()
         if cmd == ["uv", "sync", "-U"]:
             class Res: stdout = ""
             return Res()
@@ -153,19 +158,23 @@ def test_ws_sync_uses_active_venv_parent_by_default(tmp_path, monkeypatch):
     assert any(cmd == ["uv", "sync", "-U"] and kwargs["cwd"] == workspace for cmd,kwargs in calls)
 
 
-def test_ws_add_updates_repos_then_runs_sync(tmp_path, monkeypatch):
+def test_ws_add_clones_and_syncs(tmp_path, monkeypatch):
     (tmp_path/"repos.txt").write_text("AnswerDotAI/existing\n")
-    calls = []
+    sync_calls, clone_calls = [], []
 
-    def fake_sync(workspace, repos_file, pyproject_file, template_file):
-        calls.append((workspace, repos_file, pyproject_file, template_file))
+    def fake_sync(*a): sync_calls.append(a)
+    def fake_clone(repo, root="."):
+        clone_calls.append((repo, root))
+        return "✓ cloned"
 
     monkeypatch.setattr(core, "ws_sync", fake_sync)
+    monkeypatch.setattr(core, "_clone_one", fake_clone)
 
     core.ws_add("answerdotai/fastws", workspace=str(tmp_path))
 
     assert (tmp_path/"repos.txt").read_text() == "AnswerDotAI/existing\nanswerdotai/fastws\n"
-    assert calls == [(str(tmp_path), "repos.txt", "pyproject.toml", "pyproject.tmpl")]
+    assert clone_calls == [("answerdotai/fastws", str(tmp_path))]
+    assert sync_calls == [(str(tmp_path), "repos.txt", "pyproject.toml", "pyproject.tmpl")]
 
 
 def test_ws_status_summarizes_unpushed_commits_by_default(tmp_path, monkeypatch, capsys):

@@ -206,21 +206,25 @@ def _write_pyright_pth_files(root: Path) -> list[Path]:
             created.append(pth)
     return created
 
-def _clone_one(repo: str) -> str:
-    d = _repo_dir(repo)
-    if Path(d).exists(): return f"✓ {d}: already exists"
+def _clone_one(repo: str, root: str = ".") -> str:
+    d = Path(root)/_repo_dir(repo)
+    if d.exists(): return f"✓ {d.name}: already exists"
     try:
-        subprocess.run(["git", "clone", f"git@github.com:{repo}.git"], check=True, capture_output=True)
-        return f"✓ {d}: cloned"
-    except subprocess.CalledProcessError as e: return f"✗ {d}: {e.stderr.decode().strip()}"
+        subprocess.run(["git", "clone", f"git@github.com:{repo}.git", str(d)], check=True, capture_output=True)
+        return f"✓ {d.name}: cloned"
+    except subprocess.CalledProcessError as e: return f"✗ {d.name}: {e.stderr.decode().strip()}"
 
-def _pull_one(repo: str) -> str:
-    d = _repo_dir(repo)
-    if not Path(d).exists(): return f"✗ {d}: directory not found"
+def _pull_one(repo: str, root: str = ".") -> str:
+    d = Path(root)/_repo_dir(repo)
+    if not d.exists(): return f"✗ {d.name}: directory not found"
     try:
-        res = subprocess.run(["git", "-C", d, "pull", "-q", "--stat"], check=True, capture_output=True, text=True)
-        return f"✓ {d}" + (f"\n{res.stdout.strip()}" if res.stdout.strip() else "")
+        res = subprocess.run(["git", "-C", str(d), "pull", "-q", "--stat"], check=True, capture_output=True, text=True)
+        return f"✓ {d.name}" + (f"\n{res.stdout.strip()}" if res.stdout.strip() else "")
     except subprocess.CalledProcessError as e: return f"✗ {d}: {e.stderr.strip()}"
+
+def _pull(repos: list[str], workers: int = 16, root: str = "."):
+    with ThreadPoolExecutor(max_workers=workers) as ex:
+        for result in as_completed([ex.submit(_pull_one, r, root) for r in repos]): print(result.result())
 
 def ws_clone(
     repos_file: str = "repos.txt",  # File containing repo list (one per line: owner/repo)
@@ -235,22 +239,24 @@ def ws_clone(
 def ws_clone_cli(
     repos_file: str = "repos.txt",  # File containing repo list (one per line: owner/repo)
     workers: int = 16,  # Number of parallel workers
-): ws_clone(repos_file, workers)
+):
+    "Clone all repos from a repos file."
+    ws_clone(repos_file, workers)
 
 def ws_pull(
     repos_file: str = "repos.txt",  # File containing repo list
     workers: int = 16,  # Number of parallel workers
 ):
     "Pull updates for all repos."
-    repos = _load_repos(repos_file)
-    with ThreadPoolExecutor(max_workers=workers) as ex:
-        for result in as_completed([ex.submit(_pull_one, r) for r in repos]): print(result.result())
+    _pull(_load_repos(repos_file), workers)
 
 @call_parse
 def ws_pull_cli(
     repos_file: str = "repos.txt",  # File containing repo list
     workers: int = 16,  # Number of parallel workers
-): ws_pull(repos_file, workers)
+):
+    "Pull updates for all repos."
+    ws_pull(repos_file, workers)
 
 def ws_status(
     repos_file: str = "repos.txt",  # File containing repo list
@@ -281,7 +287,9 @@ def ws_status(
 def ws_status_cli(
     repos_file: str = "repos.txt",  # File containing repo list
     branches: bool = False,  # Show unpushed commit details
-): ws_status(repos_file, branches)
+):
+    "Show uncommitted changes and optionally unpushed commit details across repos."
+    ws_status(repos_file, branches)
 
 def ws_branches(
     repos_file: str = "repos.txt",  # File containing repo list
@@ -305,7 +313,9 @@ def ws_branches(
 def ws_branches_cli(
     repos_file: str = "repos.txt",  # File containing repo list
     expected: str = "main",  # Expected branch name
-): ws_branches(repos_file, expected)
+):
+    "Check if all repos are on the expected branch."
+    ws_branches(repos_file, expected)
 
 def ws_sync(
     workspace: str = "",  # Workspace root; defaults to active venv parent when available
@@ -318,8 +328,10 @@ def ws_sync(
     repos_path = _resolve_path(root, repos_file)
     pyproject_path = _resolve_path(root, pyproject_file)
     template_path = _resolve_path(root, template_file)
+    repos = _discover_ws_repos(root)
 
-    if missing_repos := _update_repos_file(repos_path, _discover_ws_repos(root)): print(f"Added repos: {', '.join(missing_repos)}")
+    if missing_repos := _update_repos_file(repos_path, repos): print(f"Added repos: {', '.join(missing_repos)}")
+    _pull(repos, root=str(root))
 
     if missing_projects := _sync_ws_pyproject(pyproject_path, template_path, _ws_projects(root)): print(f"Added workspace projects: {', '.join(missing_projects)}")
 
@@ -332,7 +344,9 @@ def ws_sync_cli(
     repos_file: str = "repos.txt",  # Repo list to update from local git remotes
     pyproject_file: str = "pyproject.toml",  # Workspace pyproject to update
     template_file: str = "pyproject.tmpl",  # Template copied when pyproject.toml is missing
-): ws_sync(workspace, repos_file, pyproject_file, template_file)
+):
+    "Sync workspace metadata, run uv sync -U, and refresh Pyright editable paths."
+    ws_sync(workspace, repos_file, pyproject_file, template_file)
 
 def ws_add(
     repo: str,  # Repo to add, e.g. AnswerDotAI/fastws
@@ -348,6 +362,7 @@ def ws_add(
     added = _update_repos_file(repos_path, [repo])
     if added: print(f"Added repo: {repo}")
     else: print(f"Repo already present: {repo}")
+    print(_clone_one(repo, str(root)))
     ws_sync(str(root), repos_file, pyproject_file, template_file)
 
 @call_parse
@@ -357,4 +372,6 @@ def ws_add_cli(
     repos_file: str = "repos.txt",  # Repo list to update
     pyproject_file: str = "pyproject.toml",  # Workspace pyproject to update
     template_file: str = "pyproject.tmpl",  # Template copied when pyproject.toml is missing
-): ws_add(repo, workspace, repos_file, pyproject_file, template_file)
+):
+    "Add a repo to repos.txt and then run ws-sync."
+    ws_add(repo, workspace, repos_file, pyproject_file, template_file)
