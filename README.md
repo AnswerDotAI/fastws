@@ -60,13 +60,23 @@ ws-branches --expected develop
 ### `ws-sync`
 
 Sync the workspace metadata, pull local repos, install updates, and refresh Pyright editable paths.
-By default it uses the active venv parent as the workspace root, so you do not need to `cd` first:
+By default it uses the active venv parent as the workspace root, so you do not need to `cd` first.
 It respects `tool.uv.workspace.members` and `exclude` when scanning local projects.
 
 ```bash
 ws-sync
 ws-sync --workspace ~/aai-ws
+ws-sync --exclude-newer "1 week"
 ```
+
+**Supply chain protection:** Configure a dependency cooldown in your workspace `pyproject.toml` to prevent upgrades to recently-published packages:
+
+```toml
+[tool.fastws]
+exclude_newer = "1 day"
+```
+
+Workspace packages (local repos) are unaffected and always update normally.
 
 ### `ws-add`
 

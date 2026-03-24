@@ -55,13 +55,14 @@ def _normalize_repo(repo: str) -> str:
 
 def _ws_cfg(root: Path):
     pyproject = root/"pyproject.toml"
-    if not pyproject.exists(): return ["./*"], []
+    if not pyproject.exists(): return ["./*"], [], {}
     try: data = tomllib.loads(pyproject.read_text())
-    except tomllib.TOMLDecodeError: return ["./*"], []
+    except tomllib.TOMLDecodeError: return ["./*"], [], {}
     ws = data.get("tool", {}).get("uv", {}).get("workspace", {})
     members = ws.get("members") or ["./*"]
     exclude = ws.get("exclude") or []
-    return members, exclude
+    fastws = data.get("tool", {}).get("fastws", {})
+    return members, exclude, fastws
 
 def _matches_ws(name: str, pattern: str) -> bool:
     pattern = pattern.strip()
@@ -71,7 +72,7 @@ def _is_ws_dir(d: Path, members, exclude) -> bool:
     return d.is_dir() and not d.name.startswith(".") and any(_matches_ws(d.name, o) for o in members) and not any(_matches_ws(d.name, o) for o in exclude)
 
 def _ws_dirs(root: Path) -> list[Path]:
-    members, exclude = _ws_cfg(root)
+    members, exclude, _ = _ws_cfg(root)
     return [d for d in sorted(root.iterdir()) if _is_ws_dir(d, members, exclude)]
 
 def _discover_ws_repos(root: Path) -> list[str]:
@@ -322,6 +323,7 @@ def ws_sync(
     repos_file: str = "repos.txt",  # Repo list to update from local git remotes
     pyproject_file: str = "pyproject.toml",  # Workspace pyproject to update
     template_file: str = "pyproject.tmpl",  # Template copied when pyproject.toml is missing
+    exclude_newer: str = "",  # Override cooldown period (empty = use config default from [tool.fastws])
 ):
     "Sync workspace metadata, run uv sync -U, and refresh Pyright editable paths."
     root = _ws_root(workspace, repos_file, pyproject_file, template_file)
@@ -335,7 +337,11 @@ def ws_sync(
 
     if missing_projects := _sync_ws_pyproject(pyproject_path, template_path, _ws_projects(root)): print(f"Added workspace projects: {', '.join(missing_projects)}")
 
-    subprocess.run(["uv", "sync", "-U"], check=True, cwd=root)
+    cmd = ["uv", "sync", "-U"]
+    _, _, fastws_cfg = _ws_cfg(root)
+    cooldown = exclude_newer if exclude_newer else fastws_cfg.get("exclude_newer", "")
+    if cooldown: cmd.extend(["--exclude-newer", cooldown])
+    subprocess.run(cmd, check=True, cwd=root)
     _write_pyright_pth_files(root)
 
 @call_parse
@@ -344,9 +350,10 @@ def ws_sync_cli(
     repos_file: str = "repos.txt",  # Repo list to update from local git remotes
     pyproject_file: str = "pyproject.toml",  # Workspace pyproject to update
     template_file: str = "pyproject.tmpl",  # Template copied when pyproject.toml is missing
+    exclude_newer: str = "",  # Override cooldown period (empty = use config default from [tool.fastws])
 ):
     "Sync workspace metadata, run uv sync -U, and refresh Pyright editable paths."
-    ws_sync(workspace, repos_file, pyproject_file, template_file)
+    ws_sync(workspace, repos_file, pyproject_file, template_file, exclude_newer)
 
 def ws_add(
     repo: str,  # Repo to add, e.g. AnswerDotAI/fastws
