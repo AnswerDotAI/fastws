@@ -3,7 +3,7 @@
 __all__ = ["ws_clone", "ws_clone_cli", "ws_pull", "ws_pull_cli", "ws_status", "ws_status_cli", "ws_branches", "ws_branches_cli",
     "ws_sync", "ws_sync_cli", "ws_add", "ws_add_cli"]
 
-import ast, fnmatch, os, re, shutil, subprocess
+import ast, fnmatch, json, os, re, shutil, subprocess
 from pathlib import Path
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
@@ -193,18 +193,17 @@ def _site_packages(root: Path) -> Path|None:
         if candidates: return candidates[0]
     return None
 
-def _write_pyright_pth_files(root: Path) -> list[Path]:
+def _write_pyright_config(root: Path):
     site = _site_packages(root)
     if not site:
         print("No site-packages directory found for editable Pyright paths")
-        return []
-    created = []
-    for finder in sorted(site.glob("__editable__*_finder.py")):
-        for pkg,path in _editable_mapping(finder).items():
-            pth = site/f"_pyright_editable_{pkg}.pth"
-            pth.write_text(str(Path(path).parent) + "\n")
-            created.append(pth)
-    return created
+        return
+    paths = sorted({str(Path(p).parent) for f in site.glob("__editable__*_finder.py") for p in _editable_mapping(f).values()})
+    cfg_path = root / 'pyrightconfig.json'
+    cfg = json.loads(cfg_path.read_text()) if cfg_path.exists() else {}
+    cfg['extraPaths'] = paths
+    cfg_path.write_text(json.dumps(cfg, indent=2) + '\n')
+    for pth in site.glob('_pyright_editable_*.pth'): pth.unlink()
 
 def _clone_one(repo: str, root: str = ".") -> str:
     d = Path(root)/_repo_dir(repo)
@@ -323,7 +322,7 @@ def ws_sync(
     pyproject_file: str = "pyproject.toml",  # Workspace pyproject to update
     template_file: str = "pyproject.tmpl",  # Template copied when pyproject.toml is missing
 ):
-    "Sync workspace metadata, run uv sync -U, and refresh Pyright editable paths."
+    "Sync workspace metadata, run uv sync -U, and update Pyright config."
     root = _ws_root(workspace, repos_file, pyproject_file, template_file)
     repos_path = _resolve_path(root, repos_file)
     pyproject_path = _resolve_path(root, pyproject_file)
@@ -335,8 +334,8 @@ def ws_sync(
 
     if missing_projects := _sync_ws_pyproject(pyproject_path, template_path, _ws_projects(root)): print(f"Added workspace projects: {', '.join(missing_projects)}")
 
+    _write_pyright_config(root)
     subprocess.run(["uv", "sync", "-U"], check=True, cwd=root)
-    _write_pyright_pth_files(root)
 
 @call_parse
 def ws_sync_cli(
@@ -345,7 +344,7 @@ def ws_sync_cli(
     pyproject_file: str = "pyproject.toml",  # Workspace pyproject to update
     template_file: str = "pyproject.tmpl",  # Template copied when pyproject.toml is missing
 ):
-    "Sync workspace metadata, run uv sync -U, and refresh Pyright editable paths."
+    "Sync workspace metadata, run uv sync -U, and update Pyright config."
     ws_sync(workspace, repos_file, pyproject_file, template_file)
 
 def ws_add(
