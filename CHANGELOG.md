@@ -1,5 +1,12 @@
 <!-- do not remove -->
 
+## 0.0.7
+
+### New Features
+
+- Refactor Pyright editable path setup to write pyrightconfig.json instead of .pth files ([#4](https://github.com/AnswerDotAI/fastws/issues/4))
+
+
 ## 0.0.6
 
 ### New Features
