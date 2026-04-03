@@ -207,7 +207,7 @@ def _write_pyright_config(root: Path):
 
 def _clone_one(repo: str, root: str = ".") -> str:
     d = Path(root)/_repo_dir(repo)
-    if d.exists(): return f"✓ {d.name}: already exists"
+    if d.exists(): return
     try:
         subprocess.run(["git", "clone", f"git@github.com:{repo}.git", str(d)], check=True, capture_output=True)
         return f"✓ {d.name}: cloned"
@@ -232,7 +232,8 @@ def ws_clone(
     "Clone all repos from a repos file."
     repos = _load_repos(repos_file)
     with ThreadPoolExecutor(max_workers=workers) as ex:
-        for result in as_completed([ex.submit(_clone_one, r) for r in repos]): print(result.result())
+        for result in as_completed([ex.submit(_clone_one, r) for r in repos]):
+            if result.result(): print(result.result())
 
 @call_parse
 def ws_clone_cli(
