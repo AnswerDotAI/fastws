@@ -50,6 +50,32 @@ def test_sync_workspace_pyproject_skips_case_only_source_differences(tmp_path):
     assert pyproject.read_text() == '[project]\nname = "uvws"\ndependencies = ["FastWS"]\n\n[tool.uv.sources]\nFastWS = { workspace = true }\n'
 
 
+def test_sync_workspace_pyproject_skips_hyphen_underscore_source_differences(tmp_path):
+    pyproject = tmp_path/"pyproject.toml"
+    pyproject.write_text('[project]\nname = "uvws"\ndependencies = ["solveit-client"]\n\n[tool.uv.sources]\nsolveit-client = { workspace = true }\n')
+
+    added = core._sync_ws_pyproject(pyproject, tmp_path/"pyproject.tmpl", ["solveit_client"])
+
+    assert added == []
+    assert pyproject.read_text() == '[project]\nname = "uvws"\ndependencies = ["solveit-client"]\n\n[tool.uv.sources]\nsolveit-client = { workspace = true }\n'
+
+
+def test_sync_workspace_pyproject_dedupes_normalized_names(tmp_path):
+    pyproject = tmp_path/"pyproject.toml"
+    pyproject.write_text(
+        '[project]\nname = "uvws"\ndependencies = [\n    "solveit-client",\n    "solveit_client",\n]\n\n'
+        '[tool.uv.sources]\nsolveit-client = { workspace = true }\nsolveit_client = { workspace = true }\n'
+    )
+
+    added = core._sync_ws_pyproject(pyproject, tmp_path/"pyproject.tmpl", ["solveit_client"])
+
+    assert added == []
+    assert pyproject.read_text() == (
+        '[project]\nname = "uvws"\ndependencies = [\n    "solveit-client",\n]\n\n'
+        '[tool.uv.sources]\nsolveit-client = { workspace = true }\n\n'
+    )
+
+
 def test_workspace_projects_skip_excluded_dirs_and_template_names(tmp_path):
     (tmp_path/"pyproject.toml").write_text('[tool.uv.workspace]\nmembers = ["./*"]\nexclude = ["skip-*"]\n')
     keep = tmp_path/"keep"

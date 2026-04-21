@@ -26,12 +26,12 @@ def _resolve_path(root: Path, path: str) -> Path:
 
 def _repo_key(repo: str) -> str: return repo.strip().rstrip("/").removesuffix(".git").casefold()
 
-def _pkg_key(name: str) -> str: return name.casefold()
+def _pkg_key(name: str) -> str: return re.sub(r"[-_.]+", "-", name.strip()).casefold()
 
 def _dep_key(dep: str) -> str:
     dep = dep.split(";", 1)[0].strip()
     dep = re.split(r"[\s<>=!~]", dep, maxsplit=1)[0]
-    return dep.split("[", 1)[0].casefold()
+    return _pkg_key(dep.split("[", 1)[0])
 
 def _ws_root(workspace: str = "", repos_file: str = "repos.txt", pyproject_file: str = "pyproject.toml",
     template_file: str = "pyproject.tmpl") -> Path:
@@ -155,17 +155,26 @@ def _sync_ws_pyproject(pyproject_path: Path, template_path: Path, projects: list
         shutil.copyfile(template_path, pyproject_path)
     content = pyproject_path.read_text()
     data = tomllib.loads(content)
-    sources = dict(data.get("tool", {}).get("uv", {}).get("sources", {}))
-    source_keys = {_pkg_key(proj) for proj in sources}
+    source_keys, deduped_sources = set(), {}
+    for proj, cfg in data.get("tool", {}).get("uv", {}).get("sources", {}).items():
+        if (key := _pkg_key(proj)) in source_keys: continue
+        source_keys.add(key)
+        deduped_sources[proj] = cfg
+    sources = dict(deduped_sources)
     missing = [proj for proj in projects if _pkg_key(proj) not in source_keys]
-    if not missing: return []
     for proj in missing: sources[proj] = {"workspace": True}
-    deps = list(data.get("project", {}).get("dependencies", []))
-    dep_keys = {_dep_key(dep) for dep in deps}
+    raw_deps = list(data.get("project", {}).get("dependencies", []))
+    deduped_deps, dep_keys = [], set()
+    for dep in raw_deps:
+        if (key := _dep_key(dep)) in dep_keys: continue
+        deduped_deps.append(dep)
+        dep_keys.add(key)
+    deps = deduped_deps
     for proj in missing:
         if _pkg_key(proj) in dep_keys: continue
         deps.append(proj)
         dep_keys.add(_pkg_key(proj))
+    if not missing and len(sources) == len(data.get("tool", {}).get("uv", {}).get("sources", {})) and len(deps) == len(raw_deps): return []
     source_lines = "\n".join(f"{proj} = {{ workspace = true }}" for proj in sources)
     content = _replace_table(content, "tool.uv.sources", source_lines)
     content = _replace_project_dependencies(content, deps)
