@@ -322,6 +322,7 @@ def ws_sync(
     repos_file: str = "repos.txt",  # Repo list to update from local git remotes
     pyproject_file: str = "pyproject.toml",  # Workspace pyproject to update
     template_file: str = "pyproject.tmpl",  # Template copied when pyproject.toml is missing
+    workers: int = 16,  # Number of parallel workers
 ):
     "Sync workspace metadata, run uv sync -U, and update Pyright config."
     root = _ws_root(workspace, repos_file, pyproject_file, template_file)
@@ -331,7 +332,7 @@ def ws_sync(
     repos = _discover_ws_repos(root)
 
     if missing_repos := _update_repos_file(repos_path, repos): print(f"Added repos: {', '.join(missing_repos)}")
-    _pull(repos, root=str(root))
+    _pull(repos, workers=workers, root=str(root))
 
     if missing_projects := _sync_ws_pyproject(pyproject_path, template_path, _ws_projects(root)): print(f"Added workspace projects: {', '.join(missing_projects)}")
 
@@ -344,9 +345,10 @@ def ws_sync_cli(
     repos_file: str = "repos.txt",  # Repo list to update from local git remotes
     pyproject_file: str = "pyproject.toml",  # Workspace pyproject to update
     template_file: str = "pyproject.tmpl",  # Template copied when pyproject.toml is missing
+    workers: int = 16,  # Number of parallel workers
 ):
     "Sync workspace metadata, run uv sync -U, and update Pyright config."
-    ws_sync(workspace, repos_file, pyproject_file, template_file)
+    ws_sync(workspace, repos_file, pyproject_file, template_file, workers)
 
 def ws_add(
     repo: str,  # Repo to add, e.g. AnswerDotAI/fastws
