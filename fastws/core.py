@@ -3,7 +3,7 @@
 __all__ = ["ws_clone", "ws_clone_cli", "ws_pull", "ws_pull_cli", "ws_status", "ws_status_cli", "ws_branches", "ws_branches_cli",
     "ws_sync", "ws_sync_cli", "ws_add", "ws_add_cli"]
 
-import ast, fnmatch, json, os, re, shutil, subprocess
+import ast, fnmatch, json, os, re, shutil, subprocess, sys
 from pathlib import Path
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
@@ -32,6 +32,11 @@ def _dep_key(dep: str) -> str:
     dep = dep.split(";", 1)[0].strip()
     dep = re.split(r"[\s<>=!~]", dep, maxsplit=1)[0]
     return dep.split("[", 1)[0].casefold()
+
+
+def _filter_uv_sync_stderr(stderr: str) -> str:
+    pat = r"(?m)^warning: The package `[^`]+ @ file://[^`]+` does not have an extra named `dev`\n?"
+    return re.sub(pat, "", stderr)
 
 def _ws_root(workspace: str = "", repos_file: str = "repos.txt", pyproject_file: str = "pyproject.toml",
     template_file: str = "pyproject.tmpl") -> Path:
@@ -164,7 +169,7 @@ def _sync_ws_pyproject(pyproject_path: Path, template_path: Path, projects: list
     dep_keys = {_dep_key(dep) for dep in deps}
     for proj in missing:
         if _pkg_key(proj) in dep_keys: continue
-        deps.append(proj)
+        deps.append(f"{proj}[dev]")
         dep_keys.add(_pkg_key(proj))
     source_lines = "\n".join(f"{proj} = {{ workspace = true }}" for proj in sources)
     content = _replace_table(content, "tool.uv.sources", source_lines)
@@ -335,7 +340,10 @@ def ws_sync(
 
     if missing_projects := _sync_ws_pyproject(pyproject_path, template_path, _ws_projects(root)): print(f"Added workspace projects: {', '.join(missing_projects)}")
 
-    subprocess.run(["uv", "sync", "-U"], check=True, cwd=root)
+    res = subprocess.run(["uv", "sync", "-U"], cwd=root, text=True, capture_output=True)
+    if res.stdout: sys.stdout.write(res.stdout)
+    if stderr := _filter_uv_sync_stderr(res.stderr): sys.stderr.write(stderr)
+    if res.returncode: raise subprocess.CalledProcessError(res.returncode, res.args, output=res.stdout, stderr=stderr)
 
 @call_parse
 def ws_sync_cli(

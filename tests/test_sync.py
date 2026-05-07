@@ -36,8 +36,8 @@ def test_sync_workspace_pyproject_copies_template_and_adds_projects(tmp_path):
     assert added == ["alpha", "beta"]
     assert 'alpha = { workspace = true }' in content
     assert 'beta = { workspace = true }' in content
-    assert '"alpha"' in content
-    assert '"beta"' in content
+    assert '"alpha[dev]"' in content
+    assert '"beta[dev]"' in content
 
 
 def test_sync_workspace_pyproject_skips_case_only_source_differences(tmp_path):
@@ -101,8 +101,7 @@ def test_ws_sync_updates_workspace_and_runs_uv(tmp_path, monkeypatch):
             class Res: stdout = ""
             return Res()
         if cmd == ["uv", "sync", "-U"]:
-            class Res: stdout = ""
-            return Res()
+            return core.subprocess.CompletedProcess(cmd, 0, "", "")
         raise AssertionError(f"Unexpected command: {cmd}")
 
     monkeypatch.setattr(core.subprocess, "run", fake_run)
@@ -112,7 +111,7 @@ def test_ws_sync_updates_workspace_and_runs_uv(tmp_path, monkeypatch):
     assert "AnswerDotAI/repo1" in (tmp_path/"repos.txt").read_text()
     pyproject = (tmp_path/"pyproject.toml").read_text()
     assert 'newpkg = { workspace = true }' in pyproject
-    assert '"newpkg"' in pyproject
+    assert '"newpkg[dev]"' in pyproject
     assert next(i for i,(cmd,_) in enumerate(calls) if cmd[:4] == ["git", "-C", str(repo), "pull"]) < next(i for i,(cmd,_) in enumerate(calls) if cmd == ["uv", "sync", "-U"])
     assert any(cmd == ["uv", "sync", "-U"] and kwargs["cwd"] == tmp_path for cmd,kwargs in calls)
 
@@ -144,8 +143,7 @@ def test_ws_sync_uses_active_venv_parent_by_default(tmp_path, monkeypatch):
             class Res: stdout = ""
             return Res()
         if cmd == ["uv", "sync", "-U"]:
-            class Res: stdout = ""
-            return Res()
+            return core.subprocess.CompletedProcess(cmd, 0, "", "")
         raise AssertionError(f"Unexpected command: {cmd}")
 
     monkeypatch.setattr(core.subprocess, "run", fake_run)
