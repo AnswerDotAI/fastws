@@ -274,8 +274,7 @@ def ws_status(
         unpushed = ""
         try:
             if branches: unpushed = g.log('--branches', '--not', '--remotes', format='%h %s') or ""
-            elif (branch := g.branch(show_current=True).strip()) in ('main', 'master'):
-                unpushed = g.log('@{upstream}..HEAD', '-1', format='%h %s') or ""
+            elif (branch := g.branch(show_current=True).strip()) in ('main', 'master'): unpushed = g.log('@{upstream}..HEAD', '-1', format='%h %s') or ""
         except Exception: pass
         if isinstance(unpushed, list): unpushed = "\n".join(unpushed)
         if changes or unpushed:
@@ -324,7 +323,7 @@ def ws_sync(
     template_file: str = "pyproject.tmpl",  # Template copied when pyproject.toml is missing
     workers: int = 16,  # Number of parallel workers
 ):
-    "Sync workspace metadata, run uv sync -U, and update Pyright config."
+    "Sync workspace metadata and run uv sync -U."
     root = _ws_root(workspace, repos_file, pyproject_file, template_file)
     repos_path = _resolve_path(root, repos_file)
     pyproject_path = _resolve_path(root, pyproject_file)
@@ -336,7 +335,6 @@ def ws_sync(
 
     if missing_projects := _sync_ws_pyproject(pyproject_path, template_path, _ws_projects(root)): print(f"Added workspace projects: {', '.join(missing_projects)}")
 
-    _write_pyright_config(root)
     subprocess.run(["uv", "sync", "-U"], check=True, cwd=root)
 
 @call_parse
@@ -347,7 +345,7 @@ def ws_sync_cli(
     template_file: str = "pyproject.tmpl",  # Template copied when pyproject.toml is missing
     workers: int = 16,  # Number of parallel workers
 ):
-    "Sync workspace metadata, run uv sync -U, and update Pyright config."
+    "Sync workspace metadata and run uv sync -U."
     ws_sync(workspace, repos_file, pyproject_file, template_file, workers)
 
 def ws_add(

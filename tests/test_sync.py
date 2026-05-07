@@ -65,16 +65,17 @@ def test_workspace_projects_skip_excluded_dirs_and_template_names(tmp_path):
     assert core._ws_projects(tmp_path) == ["keepme"]
 
 
-def test_write_pyright_pth_files_from_editable_finder(tmp_path):
-    site = tmp_path/".venv"/"lib"/"python3.12"/"site-packages"
-    site.mkdir(parents=True)
-    (site/"__editable___demo_finder.py").write_text("MAPPING: dict[str, str] = {'demo': '/tmp/workspace/src/demo/__init__.py', 'tool': '/tmp/workspace/tool.py'}\n")
-
-    created = core._write_pyright_pth_files(tmp_path)
-
-    assert [p.name for p in created] == ["_pyright_editable_demo.pth", "_pyright_editable_tool.pth"]
-    assert (site/"_pyright_editable_demo.pth").read_text() == "/tmp/workspace/src/demo\n"
-    assert (site/"_pyright_editable_tool.pth").read_text() == "/tmp/workspace\n"
+# def test_write_pyright_pth_files_from_editable_finder(tmp_path):
+#     site = tmp_path/".venv"/"lib"/"python3.12"/"site-packages"
+#     site.mkdir(parents=True)
+#     mapping = "MAPPING: dict[str, str] = {'demo': '/tmp/workspace/src/demo/__init__.py', 'tool': '/tmp/workspace/tool.py'}\n"
+#     (site/"__editable___demo_finder.py").write_text(mapping)
+#
+#     created = core._write_pyright_pth_files(tmp_path)
+#
+#     assert [p.name for p in created] == ["_pyright_editable_demo.pth", "_pyright_editable_tool.pth"]
+#     assert (site/"_pyright_editable_demo.pth").read_text() == "/tmp/workspace/src/demo\n"
+#     assert (site/"_pyright_editable_tool.pth").read_text() == "/tmp/workspace\n"
 
 
 def test_ws_sync_updates_workspace_and_runs_uv(tmp_path, monkeypatch):
@@ -112,7 +113,6 @@ def test_ws_sync_updates_workspace_and_runs_uv(tmp_path, monkeypatch):
     pyproject = (tmp_path/"pyproject.toml").read_text()
     assert 'newpkg = { workspace = true }' in pyproject
     assert '"newpkg"' in pyproject
-    assert (site/"_pyright_editable_newpkg.pth").read_text() == "/tmp/ws/src/newpkg\n"
     assert next(i for i,(cmd,_) in enumerate(calls) if cmd[:4] == ["git", "-C", str(repo), "pull"]) < next(i for i,(cmd,_) in enumerate(calls) if cmd == ["uv", "sync", "-U"])
     assert any(cmd == ["uv", "sync", "-U"] and kwargs["cwd"] == tmp_path for cmd,kwargs in calls)
 

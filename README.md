@@ -59,7 +59,7 @@ ws-branches --expected develop
 
 ### `ws-sync`
 
-Sync the workspace metadata, pull local repos, install updates, and refresh Pyright editable paths.
+Sync the workspace metadata, pull local repos, and install updates.
 By default it uses the active venv parent as the workspace root, so you do not need to `cd` first:
 It respects `tool.uv.workspace.members` and `exclude` when scanning local projects.
 
