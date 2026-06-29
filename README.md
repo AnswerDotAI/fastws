@@ -76,3 +76,14 @@ Add a repo to `repos.txt`, then run `ws-sync`:
 ws-add AnswerDotAI/fastws
 ws-add answerdotai/fastws
 ```
+
+### `ws-remove`
+
+Remove a repo: delete its clone, and drop it from `repos.txt` and the workspace
+`pyproject.toml`, then run `uv sync`. It refuses if the directory has uncommitted
+changes, unpushed commits, no `origin` remote, or isn't a clean git checkout, and
+always prompts for confirmation before deleting anything:
+
+```bash
+ws-remove AnswerDotAI/fastws
+```

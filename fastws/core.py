@@ -1,13 +1,14 @@
 "Fast workspace tools for multi-repo management."
 
 __all__ = ["ws_clone", "ws_clone_cli", "ws_pull", "ws_pull_cli", "ws_status", "ws_status_cli", "ws_branches", "ws_branches_cli",
-    "ws_sync", "ws_sync_cli", "ws_add", "ws_add_cli"]
+    "ws_sync", "ws_sync_cli", "ws_add", "ws_add_cli", "ws_remove", "ws_remove_cli"]
 
 import ast, fnmatch, json, os, re, shutil, subprocess
 from pathlib import Path
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
 from fastcore.script import call_parse
+from fastcore.meta import delegates
 from fastgit import Git
 
 try: import tomllib
@@ -95,6 +96,31 @@ def _update_repos_file(repos_path: Path, repos: list[str]) -> list[str]:
     if content and not content.endswith("\n"): content += "\n"
     repos_path.write_text(content + "\n".join(missing) + "\n")
     return missing
+
+def _remove_from_repos_file(repos_path: Path, repo: str) -> bool:
+    if not repos_path.exists(): return False
+    key = _repo_key(repo)
+    lines = repos_path.read_text().splitlines()
+    kept = [l for l in lines if l.startswith("#") or not l.strip() or _repo_key(l) != key]
+    if len(kept) == len(lines): return False
+    repos_path.write_text("\n".join(kept) + ("\n" if kept else ""))
+    return True
+
+def _remove_from_pyproject(pyproject_path: Path, names: list[str]) -> list[str]:
+    if not pyproject_path.exists(): return []
+    content = pyproject_path.read_text()
+    data = tomllib.loads(content)
+    sources = dict(data.get("tool", {}).get("uv", {}).get("sources", {}))
+    deps = list(data.get("project", {}).get("dependencies", []))
+    targets = {_pkg_key(n) for n in names}
+    removed = sorted({_pkg_key(s) for s in sources if _pkg_key(s) in targets} | {_dep_key(d) for d in deps if _dep_key(d) in targets})
+    if not removed: return []
+    sources = {k:v for k,v in sources.items() if _pkg_key(k) not in targets}
+    deps = [d for d in deps if _dep_key(d) not in targets]
+    content = _replace_table(content, "tool.uv.sources", "\n".join(f"{k} = {{ workspace = true }}" for k in sources))
+    content = _replace_project_dependencies(content, deps)
+    pyproject_path.write_text(content)
+    return removed
 
 def _read_pyproject_name(path: Path) -> str|None:
     try: data = tomllib.loads(path.read_text())
@@ -236,12 +262,8 @@ def ws_clone(
             if result.result(): print(result.result())
 
 @call_parse
-def ws_clone_cli(
-    repos_file: str = "repos.txt",  # File containing repo list (one per line: owner/repo)
-    workers: int = 16,  # Number of parallel workers
-):
-    "Clone all repos from a repos file."
-    ws_clone(repos_file, workers)
+@delegates(ws_clone)
+def ws_clone_cli(**kwargs): ws_clone(**kwargs)
 
 def ws_pull(
     repos_file: str = "repos.txt",  # File containing repo list
@@ -251,12 +273,8 @@ def ws_pull(
     _pull(_load_repos(repos_file), workers)
 
 @call_parse
-def ws_pull_cli(
-    repos_file: str = "repos.txt",  # File containing repo list
-    workers: int = 16,  # Number of parallel workers
-):
-    "Pull updates for all repos."
-    ws_pull(repos_file, workers)
+@delegates(ws_pull)
+def ws_pull_cli(**kwargs): ws_pull(**kwargs)
 
 def ws_status(
     repos_file: str = "repos.txt",  # File containing repo list
@@ -283,12 +301,8 @@ def ws_status(
             if unpushed: print(unpushed if branches else "unpushed commits")
 
 @call_parse
-def ws_status_cli(
-    repos_file: str = "repos.txt",  # File containing repo list
-    branches: bool = False,  # Show unpushed commit details
-):
-    "Show uncommitted changes and optionally unpushed commit details across repos."
-    ws_status(repos_file, branches)
+@delegates(ws_status)
+def ws_status_cli(**kwargs): ws_status(**kwargs)
 
 def ws_branches(
     repos_file: str = "repos.txt",  # File containing repo list
@@ -309,12 +323,8 @@ def ws_branches(
         print(f"✓ {d}: OK (on {expected})" if branch == expected else f"⚠️  {d}: WARNING (on {branch})")
 
 @call_parse
-def ws_branches_cli(
-    repos_file: str = "repos.txt",  # File containing repo list
-    expected: str = "main",  # Expected branch name
-):
-    "Check if all repos are on the expected branch."
-    ws_branches(repos_file, expected)
+@delegates(ws_branches)
+def ws_branches_cli(**kwargs): ws_branches(**kwargs)
 
 def ws_sync(
     workspace: str = "",  # Workspace root; defaults to active venv parent when available
@@ -338,15 +348,8 @@ def ws_sync(
     subprocess.run(["uv", "sync", "-U"], check=True, cwd=root)
 
 @call_parse
-def ws_sync_cli(
-    workspace: str = "",  # Workspace root; defaults to active venv parent when available
-    repos_file: str = "repos.txt",  # Repo list to update from local git remotes
-    pyproject_file: str = "pyproject.toml",  # Workspace pyproject to update
-    template_file: str = "pyproject.tmpl",  # Template copied when pyproject.toml is missing
-    workers: int = 16,  # Number of parallel workers
-):
-    "Sync workspace metadata and run uv sync -U."
-    ws_sync(workspace, repos_file, pyproject_file, template_file, workers)
+@delegates(ws_sync)
+def ws_sync_cli(**kwargs): ws_sync(**kwargs)
 
 def ws_add(
     repo: str,  # Repo to add, e.g. AnswerDotAI/fastws
@@ -366,12 +369,64 @@ def ws_add(
     ws_sync(str(root), repos_file, pyproject_file, template_file)
 
 @call_parse
+@delegates(ws_add)
 def ws_add_cli(
     repo: str,  # Repo to add, e.g. AnswerDotAI/fastws
+    **kwargs): ws_add(repo, **kwargs)
+
+def _resolve_repo_dir(root: Path, repo: str) -> Path:
+    root = root.resolve()
+    d = root/_repo_dir(repo)
+    if d.is_symlink(): raise SystemExit(f"Refusing to remove {d}: it is a symlink")
+    if (rd := d.resolve()) == root or rd.parent != root: raise SystemExit(f"Refusing to remove {d}: not directly inside {root}")
+    return d
+
+def _git_out(d: Path, *args: str) -> str:
+    return subprocess.run(["git", "-C", str(d), *args], check=True, capture_output=True, text=True).stdout
+
+def _repo_safety_issues(d: Path) -> list[str]:
+    if not (d/".git").exists(): return [f"{d.name} is not a git repository"]
+    issues = []
+    if subprocess.run(["git", "-C", str(d), "remote", "get-url", "origin"], capture_output=True, text=True).returncode != 0:
+        issues.append(f"{d.name} has no 'origin' remote")
+    if _git_out(d, "status", "--porcelain").strip(): issues.append(f"{d.name} has uncommitted changes")
+    if _git_out(d, "log", "--branches", "--not", "--remotes", "--format=%h").strip(): issues.append(f"{d.name} has unpushed commits")
+    return issues
+
+def ws_remove(
+    repo: str,  # Repo to remove, e.g. AnswerDotAI/fastws
     workspace: str = "",  # Workspace root; defaults to active venv parent when available
     repos_file: str = "repos.txt",  # Repo list to update
     pyproject_file: str = "pyproject.toml",  # Workspace pyproject to update
     template_file: str = "pyproject.tmpl",  # Template copied when pyproject.toml is missing
 ):
-    "Add a repo to repos.txt and then run ws-sync."
-    ws_add(repo, workspace, repos_file, pyproject_file, template_file)
+    "Remove a repo: delete its clone and drop it from repos.txt and the workspace pyproject."
+    root = _ws_root(workspace, repos_file, pyproject_file, template_file)
+    repo = _normalize_repo(repo)
+    repos_path = _resolve_path(root, repos_file)
+    pyproject_path = _resolve_path(root, pyproject_file)
+    d = _resolve_repo_dir(root, repo)
+    name = _read_pyproject_name(d/"pyproject.toml") if (d/"pyproject.toml").exists() else None
+    names = [name] if name else [d.name]
+    in_repos = _repo_key(repo) in {_repo_key(r) for r in (_load_repos(repos_path) if repos_path.exists() else [])}
+    if not d.exists() and not in_repos: raise SystemExit(f"Nothing to remove for {repo}")
+    if d.exists() and (issues := _repo_safety_issues(d)): raise SystemExit("Refusing to remove:\n" + "\n".join(f"  - {i}" for i in issues))
+    print(f"About to remove {repo}:")
+    if in_repos: print(f"  - entry in {repos_file}")
+    if d.exists(): print(f"  - directory {d}")
+    print(f"  - workspace entry for {', '.join(names)} in {pyproject_file}")
+    try: ans = input("Proceed? [y/N] ")
+    except EOFError: ans = ""
+    if ans.strip().lower() not in ("y", "yes"): raise SystemExit("Aborted")
+    if _remove_from_repos_file(repos_path, repo): print(f"Removed from {repos_file}")
+    if d.exists():
+        shutil.rmtree(d)
+        print(f"Removed directory {d}")
+    if removed := _remove_from_pyproject(pyproject_path, names): print(f"Removed workspace entries: {', '.join(removed)}")
+    subprocess.run(["uv", "sync"], check=True, cwd=root)
+
+@call_parse
+@delegates(ws_remove)
+def ws_remove_cli(
+    repo: str,  # Repo to remove, e.g. AnswerDotAI/fastws
+    **kwargs): ws_remove(repo, **kwargs)

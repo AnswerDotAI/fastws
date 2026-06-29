@@ -177,6 +177,137 @@ def test_ws_add_clones_and_syncs(tmp_path, monkeypatch):
     assert sync_calls == [(str(tmp_path), "repos.txt", "pyproject.toml", "pyproject.tmpl")]
 
 
+def test_remove_from_repos_file_drops_matching_case_insensitive(tmp_path):
+    repos_path = tmp_path/"repos.txt"
+    repos_path.write_text("# header\nAnswerDotAI/keep\nAnswerDotAI/fastws\n")
+
+    removed = core._remove_from_repos_file(repos_path, "answerdotai/fastws")
+
+    assert removed is True
+    assert repos_path.read_text() == "# header\nAnswerDotAI/keep\n"
+
+
+def test_remove_from_repos_file_returns_false_when_absent(tmp_path):
+    repos_path = tmp_path/"repos.txt"
+    repos_path.write_text("AnswerDotAI/keep\n")
+
+    removed = core._remove_from_repos_file(repos_path, "AnswerDotAI/gone")
+
+    assert removed is False
+    assert repos_path.read_text() == "AnswerDotAI/keep\n"
+
+
+def test_remove_from_pyproject_drops_source_and_dep(tmp_path):
+    pyproject = tmp_path/"pyproject.toml"
+    pyproject.write_text('[project]\nname = "uvws"\ndependencies = [\n    "alpha",\n    "beta",\n]\n\n[tool.uv.sources]\nalpha = { workspace = true }\nbeta = { workspace = true }\n')
+
+    removed = core._remove_from_pyproject(pyproject, ["Alpha"])
+    content = pyproject.read_text()
+
+    assert removed == ["alpha"]
+    assert "alpha" not in content
+    assert 'beta = { workspace = true }' in content
+    assert '"beta"' in content
+
+
+def test_remove_from_pyproject_returns_empty_when_absent(tmp_path):
+    pyproject = tmp_path/"pyproject.toml"
+    original = '[project]\nname = "uvws"\ndependencies = [\n    "beta",\n]\n\n[tool.uv.sources]\nbeta = { workspace = true }\n'
+    pyproject.write_text(original)
+
+    removed = core._remove_from_pyproject(pyproject, ["alpha"])
+
+    assert removed == []
+    assert pyproject.read_text() == original
+
+
+def _setup_remove_ws(tmp_path):
+    (tmp_path/"repos.txt").write_text("AnswerDotAI/keep\nAnswerDotAI/repo1\n")
+    (tmp_path/"pyproject.toml").write_text('[project]\nname = "uvws"\ndependencies = [\n    "repo1pkg",\n    "keeppkg",\n]\n\n[tool.uv.sources]\nrepo1pkg = { workspace = true }\nkeeppkg = { workspace = true }\n')
+    repo = tmp_path/"repo1"
+    repo.mkdir()
+    (repo/".git").write_text("gitdir: whatever\n")
+    (repo/"pyproject.toml").write_text('[project]\nname = "repo1pkg"\n')
+    return repo
+
+
+def _fake_git_run(repo, status="", unpushed="", origin_rc=0):
+    def fake_run(cmd, **kwargs):
+        if cmd[:4] == ["git", "-C", str(repo), "remote"]:
+            class Res: returncode = origin_rc; stdout = "git@github.com:AnswerDotAI/repo1.git\n"
+            return Res()
+        if cmd[:4] == ["git", "-C", str(repo), "status"]:
+            class Res: returncode = 0; stdout = status
+            return Res()
+        if cmd[:4] == ["git", "-C", str(repo), "log"]:
+            class Res: returncode = 0; stdout = unpushed
+            return Res()
+        if cmd == ["uv", "sync"]:
+            class Res: returncode = 0; stdout = ""
+            return Res()
+        raise AssertionError(f"Unexpected command: {cmd}")
+    return fake_run
+
+
+def test_ws_remove_happy_path(tmp_path, monkeypatch):
+    repo = _setup_remove_ws(tmp_path)
+    calls = []
+    fake = _fake_git_run(repo)
+    def tracking(cmd, **kwargs):
+        calls.append(cmd)
+        return fake(cmd, **kwargs)
+    monkeypatch.setattr(core.subprocess, "run", tracking)
+    monkeypatch.setattr("builtins.input", lambda *a: "y")
+
+    core.ws_remove("AnswerDotAI/repo1", workspace=str(tmp_path))
+
+    assert (tmp_path/"repos.txt").read_text() == "AnswerDotAI/keep\n"
+    assert not repo.exists()
+    content = (tmp_path/"pyproject.toml").read_text()
+    assert "repo1pkg" not in content
+    assert 'keeppkg = { workspace = true }' in content
+    assert ["uv", "sync"] in calls
+
+
+def test_ws_remove_refuses_when_dirty(tmp_path, monkeypatch):
+    import pytest
+    repo = _setup_remove_ws(tmp_path)
+    monkeypatch.setattr(core.subprocess, "run", _fake_git_run(repo, status="M core.py\n"))
+    monkeypatch.setattr("builtins.input", lambda *a: "y")
+
+    with pytest.raises(SystemExit):
+        core.ws_remove("AnswerDotAI/repo1", workspace=str(tmp_path))
+
+    assert repo.exists()
+    assert "AnswerDotAI/repo1" in (tmp_path/"repos.txt").read_text()
+    assert "repo1pkg" in (tmp_path/"pyproject.toml").read_text()
+
+
+def test_ws_remove_refuses_when_unpushed(tmp_path, monkeypatch):
+    import pytest
+    repo = _setup_remove_ws(tmp_path)
+    monkeypatch.setattr(core.subprocess, "run", _fake_git_run(repo, unpushed="abc123\n"))
+    monkeypatch.setattr("builtins.input", lambda *a: "y")
+
+    with pytest.raises(SystemExit):
+        core.ws_remove("AnswerDotAI/repo1", workspace=str(tmp_path))
+
+    assert repo.exists()
+
+
+def test_ws_remove_aborts_on_no(tmp_path, monkeypatch):
+    import pytest
+    repo = _setup_remove_ws(tmp_path)
+    monkeypatch.setattr(core.subprocess, "run", _fake_git_run(repo))
+    monkeypatch.setattr("builtins.input", lambda *a: "n")
+
+    with pytest.raises(SystemExit):
+        core.ws_remove("AnswerDotAI/repo1", workspace=str(tmp_path))
+
+    assert repo.exists()
+    assert "AnswerDotAI/repo1" in (tmp_path/"repos.txt").read_text()
+
+
 def test_ws_status_summarizes_unpushed_commits_by_default(tmp_path, monkeypatch, capsys):
     (tmp_path/"repo1").mkdir()
 
