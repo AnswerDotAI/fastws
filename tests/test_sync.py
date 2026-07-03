@@ -269,6 +269,27 @@ def test_ws_remove_happy_path(tmp_path, monkeypatch):
     assert ["uv", "sync"] in calls
 
 
+def test_ws_remove_matches_folder_name(tmp_path, monkeypatch):
+    repo = _setup_remove_ws(tmp_path)
+    monkeypatch.setattr(core.subprocess, "run", _fake_git_run(repo))
+    monkeypatch.setattr("builtins.input", lambda *a: "y")
+
+    core.ws_remove("repo1", workspace=str(tmp_path))
+
+    assert (tmp_path/"repos.txt").read_text() == "AnswerDotAI/keep\n"
+    assert not repo.exists()
+    assert "repo1pkg" not in (tmp_path/"pyproject.toml").read_text()
+
+
+def test_ws_remove_invalid_repo_without_folder_errors(tmp_path, monkeypatch):
+    import pytest
+    _setup_remove_ws(tmp_path)
+    monkeypatch.setattr("builtins.input", lambda *a: "y")
+
+    with pytest.raises(SystemExit):
+        core.ws_remove("nosuchdir", workspace=str(tmp_path))
+
+
 def test_ws_remove_refuses_when_dirty(tmp_path, monkeypatch):
     import pytest
     repo = _setup_remove_ws(tmp_path)
@@ -295,17 +316,22 @@ def test_ws_remove_refuses_when_unpushed(tmp_path, monkeypatch):
     assert repo.exists()
 
 
-def test_ws_remove_aborts_on_no(tmp_path, monkeypatch):
-    import pytest
+def test_ws_remove_no_keeps_directory_but_removes_metadata(tmp_path, monkeypatch):
     repo = _setup_remove_ws(tmp_path)
-    monkeypatch.setattr(core.subprocess, "run", _fake_git_run(repo))
+    calls = []
+    fake = _fake_git_run(repo)
+    def tracking(cmd, **kwargs):
+        calls.append(cmd)
+        return fake(cmd, **kwargs)
+    monkeypatch.setattr(core.subprocess, "run", tracking)
     monkeypatch.setattr("builtins.input", lambda *a: "n")
 
-    with pytest.raises(SystemExit):
-        core.ws_remove("AnswerDotAI/repo1", workspace=str(tmp_path))
+    core.ws_remove("AnswerDotAI/repo1", workspace=str(tmp_path))
 
     assert repo.exists()
-    assert "AnswerDotAI/repo1" in (tmp_path/"repos.txt").read_text()
+    assert (tmp_path/"repos.txt").read_text() == "AnswerDotAI/keep\n"
+    assert "repo1pkg" not in (tmp_path/"pyproject.toml").read_text()
+    assert ["uv", "sync"] in calls
 
 
 def test_ws_status_summarizes_unpushed_commits_by_default(tmp_path, monkeypatch, capsys):

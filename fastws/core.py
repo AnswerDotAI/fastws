@@ -374,6 +374,21 @@ def ws_add_cli(
     repo: str,  # Repo to add, e.g. AnswerDotAI/fastws
     **kwargs): ws_add(repo, **kwargs)
 
+def _is_repo_spec(repo: str) -> bool:
+    repo = repo.strip().rstrip("/").removesuffix(".git")
+    return bool(_parse_github_repo(repo) or re.fullmatch(r"[^/\s]+/[^/\s]+", repo))
+
+def _resolve_removal_target(root: Path, repo: str, repos_path: Path) -> str:
+    "Canonical owner/repo for `repo`, matching an existing folder name when `repo` isn't a valid spec."
+    if _is_repo_spec(repo): return _normalize_repo(repo)
+    if not (root/repo).is_dir(): return _normalize_repo(repo)  # invalid spec and no such folder: raise
+    for r in (_load_repos(repos_path) if repos_path.exists() else []):
+        if _repo_dir(r).casefold() == repo.casefold(): return r
+    if (root/repo/".git").exists():
+        res = subprocess.run(["git", "-C", str(root/repo), "remote", "get-url", "origin"], capture_output=True, text=True)
+        if res.returncode == 0 and (parsed := _parse_github_repo(res.stdout)): return parsed
+    return repo
+
 def _resolve_repo_dir(root: Path, repo: str) -> Path:
     root = root.resolve()
     d = root/_repo_dir(repo)
@@ -402,27 +417,21 @@ def ws_remove(
 ):
     "Remove a repo: delete its clone and drop it from repos.txt and the workspace pyproject."
     root = _ws_root(workspace, repos_file, pyproject_file, template_file)
-    repo = _normalize_repo(repo)
     repos_path = _resolve_path(root, repos_file)
     pyproject_path = _resolve_path(root, pyproject_file)
+    repo = _resolve_removal_target(root, repo, repos_path)
     d = _resolve_repo_dir(root, repo)
     name = _read_pyproject_name(d/"pyproject.toml") if (d/"pyproject.toml").exists() else None
     names = [name] if name else [d.name]
     in_repos = _repo_key(repo) in {_repo_key(r) for r in (_load_repos(repos_path) if repos_path.exists() else [])}
     if not d.exists() and not in_repos: raise SystemExit(f"Nothing to remove for {repo}")
     if d.exists() and (issues := _repo_safety_issues(d)): raise SystemExit("Refusing to remove:\n" + "\n".join(f"  - {i}" for i in issues))
-    print(f"About to remove {repo}:")
-    if in_repos: print(f"  - entry in {repos_file}")
-    if d.exists(): print(f"  - directory {d}")
-    print(f"  - workspace entry for {', '.join(names)} in {pyproject_file}")
-    try: ans = input("Proceed? [y/N] ")
-    except EOFError: ans = ""
-    if ans.strip().lower() not in ("y", "yes"): raise SystemExit("Aborted")
-    if _remove_from_repos_file(repos_path, repo): print(f"Removed from {repos_file}")
+    _remove_from_repos_file(repos_path, repo)
+    _remove_from_pyproject(pyproject_path, names)
     if d.exists():
-        shutil.rmtree(d)
-        print(f"Removed directory {d}")
-    if removed := _remove_from_pyproject(pyproject_path, names): print(f"Removed workspace entries: {', '.join(removed)}")
+        try: ans = input(f"Remove directory {d}? [y/N] ")
+        except EOFError: ans = ""
+        if ans.strip().lower() in ("y", "yes"): shutil.rmtree(d)
     subprocess.run(["uv", "sync"], check=True, cwd=root)
 
 @call_parse
