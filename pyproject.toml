@@ -16,7 +16,7 @@ classifiers = [
 ]
 
 dependencies = [
-  "fastcore>=1.13.8",
+  "fastcore>=1.14.3",
   "fastgit>=0.0.2",
   "tomli; python_version < '3.11'",
 ]
@@ -29,13 +29,13 @@ dev = [
 ]
 
 [project.scripts]
-ws-clone = "fastws.core:ws_clone_cli"
-ws-pull = "fastws.core:ws_pull_cli"
-ws-status = "fastws.core:ws_status_cli"
-ws-branches = "fastws.core:ws_branches_cli"
-ws-sync = "fastws.core:ws_sync_cli"
-ws-add = "fastws.core:ws_add_cli"
-ws-remove = "fastws.core:ws_remove_cli"
+ws-clone = "fastws.core:ws_clone"
+ws-pull = "fastws.core:ws_pull"
+ws-status = "fastws.core:ws_status"
+ws-branches = "fastws.core:ws_branches"
+ws-sync = "fastws.core:ws_sync"
+ws-add = "fastws.core:ws_add"
+ws-remove = "fastws.core:ws_remove"
 
 [project.urls]
 Homepage = "https://github.com/AnswerDotAI/fastws"

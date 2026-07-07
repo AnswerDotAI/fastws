@@ -1,14 +1,12 @@
 "Fast workspace tools for multi-repo management."
 
-__all__ = ["ws_clone", "ws_clone_cli", "ws_pull", "ws_pull_cli", "ws_status", "ws_status_cli", "ws_branches", "ws_branches_cli",
-    "ws_sync", "ws_sync_cli", "ws_add", "ws_add_cli", "ws_remove", "ws_remove_cli"]
+__all__ = ["ws_clone", "ws_pull", "ws_status", "ws_branches", "ws_sync", "ws_add", "ws_remove"]
 
 import ast, fnmatch, json, os, re, shutil, subprocess
 from pathlib import Path
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
 from fastcore.script import call_parse
-from fastcore.meta import delegates
 from fastgit import Git
 
 try: import tomllib
@@ -251,6 +249,7 @@ def _pull(repos: list[str], workers: int = 16, root: str = "."):
     with ThreadPoolExecutor(max_workers=workers) as ex:
         for result in as_completed([ex.submit(_pull_one, r, root) for r in repos]): print(result.result())
 
+@call_parse
 def ws_clone(
     repos_file: str = "repos.txt",  # File containing repo list (one per line: owner/repo)
     workers: int = 16,  # Number of parallel workers
@@ -262,9 +261,6 @@ def ws_clone(
             if result.result(): print(result.result())
 
 @call_parse
-@delegates(ws_clone)
-def ws_clone_cli(**kwargs): ws_clone(**kwargs)
-
 def ws_pull(
     repos_file: str = "repos.txt",  # File containing repo list
     workers: int = 16,  # Number of parallel workers
@@ -273,9 +269,6 @@ def ws_pull(
     _pull(_load_repos(repos_file), workers)
 
 @call_parse
-@delegates(ws_pull)
-def ws_pull_cli(**kwargs): ws_pull(**kwargs)
-
 def ws_status(
     repos_file: str = "repos.txt",  # File containing repo list
     branches: bool = False,  # Show unpushed commit details
@@ -301,9 +294,6 @@ def ws_status(
             if unpushed: print(unpushed if branches else "unpushed commits")
 
 @call_parse
-@delegates(ws_status)
-def ws_status_cli(**kwargs): ws_status(**kwargs)
-
 def ws_branches(
     repos_file: str = "repos.txt",  # File containing repo list
     expected: str = "main",  # Expected branch name
@@ -323,9 +313,6 @@ def ws_branches(
         print(f"✓ {d}: OK (on {expected})" if branch == expected else f"⚠️  {d}: WARNING (on {branch})")
 
 @call_parse
-@delegates(ws_branches)
-def ws_branches_cli(**kwargs): ws_branches(**kwargs)
-
 def ws_sync(
     workspace: str = "",  # Workspace root; defaults to active venv parent when available
     repos_file: str = "repos.txt",  # Repo list to update from local git remotes
@@ -348,9 +335,6 @@ def ws_sync(
     subprocess.run(["uv", "sync", "-U"], check=True, cwd=root)
 
 @call_parse
-@delegates(ws_sync)
-def ws_sync_cli(**kwargs): ws_sync(**kwargs)
-
 def ws_add(
     repo: str,  # Repo to add, e.g. AnswerDotAI/fastws
     workspace: str = "",  # Workspace root; defaults to active venv parent when available
@@ -367,12 +351,6 @@ def ws_add(
     else: print(f"Repo already present: {repo}")
     print(_clone_one(repo, str(root)))
     ws_sync(str(root), repos_file, pyproject_file, template_file)
-
-@call_parse
-@delegates(ws_add)
-def ws_add_cli(
-    repo: str,  # Repo to add, e.g. AnswerDotAI/fastws
-    **kwargs): ws_add(repo, **kwargs)
 
 def _is_repo_spec(repo: str) -> bool:
     repo = repo.strip().rstrip("/").removesuffix(".git")
@@ -408,6 +386,7 @@ def _repo_safety_issues(d: Path) -> list[str]:
     if _git_out(d, "log", "--branches", "--not", "--remotes", "--format=%h").strip(): issues.append(f"{d.name} has unpushed commits")
     return issues
 
+@call_parse
 def ws_remove(
     repo: str,  # Repo to remove, e.g. AnswerDotAI/fastws
     workspace: str = "",  # Workspace root; defaults to active venv parent when available
@@ -433,9 +412,3 @@ def ws_remove(
         except EOFError: ans = ""
         if ans.strip().lower() in ("y", "yes"): shutil.rmtree(d)
     subprocess.run(["uv", "sync"], check=True, cwd=root)
-
-@call_parse
-@delegates(ws_remove)
-def ws_remove_cli(
-    repo: str,  # Repo to remove, e.g. AnswerDotAI/fastws
-    **kwargs): ws_remove(repo, **kwargs)
