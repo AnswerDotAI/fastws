@@ -281,13 +281,11 @@ def ws_status(
         g = Git(d)
         if not g.exists: continue
         changes = g.status('-s') or ""
-        if isinstance(changes, list): changes = "\n".join(changes)
         unpushed = ""
         try:
             if branches: unpushed = g.log('--branches', '--not', '--remotes', format='%h %s') or ""
             elif (branch := g.branch(show_current=True).strip()) in ('main', 'master'): unpushed = g.log('@{upstream}..HEAD', '-1', format='%h %s') or ""
         except Exception: pass
-        if isinstance(unpushed, list): unpushed = "\n".join(unpushed)
         if changes or unpushed:
             print(f"\n=== {d} ===")
             if changes: print(changes)
