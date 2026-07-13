@@ -97,6 +97,9 @@ def test_ws_sync_updates_workspace_and_runs_uv(tmp_path, monkeypatch):
         if cmd[:5] == ["git", "-C", str(repo), "remote", "get-url"]:
             class Res: stdout = "git@github.com:AnswerDotAI/repo1.git\n"
             return Res()
+        if cmd[:6] == ["git", "-C", str(repo), "rev-parse", "--abbrev-ref", "HEAD" ]:
+            class Res: stdout = "main\n"
+            return Res()
         if cmd[:4] == ["git", "-C", str(repo), "pull"]:
             class Res: stdout = ""
             return Res()
@@ -139,6 +142,9 @@ def test_ws_sync_uses_active_venv_parent_by_default(tmp_path, monkeypatch):
         calls.append((cmd, kwargs))
         if cmd[:5] == ["git", "-C", str(repo), "remote", "get-url"]:
             class Res: stdout = "git@github.com:AnswerDotAI/repo1.git\n"
+            return Res()
+        if cmd[:6] == ["git", "-C", str(repo), "rev-parse", "--abbrev-ref", "HEAD" ]:
+            class Res: stdout = "main\n"
             return Res()
         if cmd[:4] == ["git", "-C", str(repo), "pull"]:
             class Res: stdout = ""

@@ -64,7 +64,7 @@ def _ws_cfg(root: Path):
 
 def _matches_ws(name: str, pattern: str) -> bool:
     pattern = pattern.strip()
-    return any(fnmatch.fnmatch(candidate, normalized) for candidate in (name, f"./{name}") for normalized in (pattern, pattern.removeprefix("./")))
+    return fnmatch.fnmatch(f"./{name}" if pattern.startswith("./") else name, pattern)
 
 def _is_ws_dir(d: Path, members, exclude) -> bool:
     return d.is_dir() and not d.name.startswith(".") and any(_matches_ws(d.name, o) for o in members) and not any(_matches_ws(d.name, o) for o in exclude)
@@ -242,7 +242,8 @@ def _pull_one(repo: str, root: str = ".") -> str:
     if not d.exists(): return f"✗ {d.name}: directory not found"
     try:
         res = subprocess.run(["git", "-C", str(d), "pull", "-q", "--stat"], check=True, capture_output=True, text=True)
-        return f"✓ {d.name}" + (f"\n{res.stdout.strip()}" if res.stdout.strip() else "")
+        br = subprocess.run(["git", "-C", str(d), "rev-parse", "--abbrev-ref", "HEAD"], check=True, capture_output=True, text=True).stdout.strip()
+        return f"✓ {d.name}" + (f' (branch: {br})' if br != 'main' else "") + (f"\n{res.stdout.strip()}" if res.stdout.strip() else "")
     except subprocess.CalledProcessError as e: return f"✗ {d}: {e.stderr.strip()}"
 
 def _pull(repos: list[str], workers: int = 16, root: str = "."):
