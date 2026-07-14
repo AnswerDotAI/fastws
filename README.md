@@ -94,3 +94,4 @@ always prompts for confirmation before deleting anything:
 ws-remove AnswerDotAI/fastws
 ws-remove fastws  # bare folder name also works if the directory exists
 ```
+
