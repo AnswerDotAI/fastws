@@ -87,6 +87,7 @@ def test_ws_sync_updates_workspace_and_runs_uv(tmp_path, monkeypatch):
     repo.mkdir()
     (pkg/"pyproject.toml").write_text('[project]\nname = "newpkg"\n')
     (repo/".git").write_text("gitdir: .git/worktrees/repo1\n")
+    (repo/"pyproject.toml").write_text('[project]\nname = "repo1pkg"\n')
     site = tmp_path/".venv"/"lib"/"python3.12"/"site-packages"
     site.mkdir(parents=True)
     (site/"__editable___newpkg_finder.py").write_text("MAPPING: dict[str, str] = {'newpkg': '/tmp/ws/src/newpkg/__init__.py'}\n")
@@ -130,6 +131,7 @@ def test_ws_sync_uses_active_venv_parent_by_default(tmp_path, monkeypatch):
     repo.mkdir()
     (pkg/"pyproject.toml").write_text('[project]\nname = "newpkg"\n')
     (repo/".git").write_text("gitdir: .git/worktrees/repo1\n")
+    (repo/"pyproject.toml").write_text('[project]\nname = "repo1pkg"\n')
     site = workspace/".venv"/"lib"/"python3.12"/"site-packages"
     site.mkdir(parents=True)
     (site/"__editable___newpkg_finder.py").write_text("MAPPING: dict[str, str] = {'newpkg': '/tmp/ws/src/newpkg/__init__.py'}\n")
@@ -391,3 +393,73 @@ def test_ws_status_shows_unpushed_commits_with_branches_flag(tmp_path, monkeypat
     core.ws_status(branches=True)
 
     assert "abc first commit" in capsys.readouterr().out
+
+
+def test_ws_sync_warns_and_skips_uv_when_member_lacks_pyproject(tmp_path, monkeypatch, capsys):
+    (tmp_path/"repos.txt").write_text("")
+    (tmp_path/"pyproject.tmpl").write_text('[project]\nname = "uvws"\ndependencies = [\n]\n\n[tool.uv.sources]\n\n')
+    (tmp_path/"emptyclone").mkdir()
+    calls = []
+
+    def fake_run(cmd, **kwargs):
+        calls.append(cmd)
+        class Res: stdout = ""
+        return Res()
+
+    monkeypatch.setattr(core.subprocess, "run", fake_run)
+
+    core.ws_sync(workspace=str(tmp_path))
+
+    assert not any(cmd[:2] == ["uv", "sync"] for cmd in calls)
+    assert "emptyclone" in capsys.readouterr().out
+
+
+def _setup_add_dir(tmp_path, git=True, pyproject=True):
+    (tmp_path/"repos.txt").write_text("AnswerDotAI/existing\n")
+    d = tmp_path/"newproj"
+    d.mkdir()
+    if git: (d/".git").mkdir()
+    if pyproject: (d/"pyproject.toml").write_text('[project]\nname = "newproj"\n')
+    return d
+
+
+def test_ws_add_resolves_local_dir(tmp_path, monkeypatch):
+    d = _setup_add_dir(tmp_path)
+    sync_calls, clone_calls = [], []
+    monkeypatch.setattr(core, "ws_sync", lambda *a: sync_calls.append(a))
+    monkeypatch.setattr(core, "_clone_one", lambda *a, **k: clone_calls.append(a) or "cloned")
+
+    def fake_run(cmd, **kwargs):
+        assert cmd[:5] == ["git", "-C", str(d), "remote", "get-url"]
+        class Res: returncode = 0; stdout = "git@github.com:AnswerDotAI/newproj.git\n"
+        return Res()
+
+    monkeypatch.setattr(core.subprocess, "run", fake_run)
+
+    core.ws_add("newproj", workspace=str(tmp_path))
+
+    assert "AnswerDotAI/newproj" in (tmp_path/"repos.txt").read_text()
+    assert clone_calls == []
+    assert len(sync_calls) == 1
+
+
+def test_ws_add_dir_form_errors_name_the_missing_piece(tmp_path, monkeypatch):
+    import pytest
+    d = _setup_add_dir(tmp_path, git=False, pyproject=False)
+    with pytest.raises(SystemExit, match="git"):
+        core.ws_add("newproj", workspace=str(tmp_path))
+
+    (d/".git").mkdir()
+    def no_origin(cmd, **kwargs):
+        class Res: returncode = 1; stdout = ""
+        return Res()
+    monkeypatch.setattr(core.subprocess, "run", no_origin)
+    with pytest.raises(SystemExit, match="origin"):
+        core.ws_add("newproj", workspace=str(tmp_path))
+
+    def with_origin(cmd, **kwargs):
+        class Res: returncode = 0; stdout = "git@github.com:AnswerDotAI/newproj.git\n"
+        return Res()
+    monkeypatch.setattr(core.subprocess, "run", with_origin)
+    with pytest.raises(SystemExit, match="pyproject"):
+        core.ws_add("newproj", workspace=str(tmp_path))

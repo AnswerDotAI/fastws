@@ -60,8 +60,10 @@ ws-branches --expected develop
 ### `ws-sync`
 
 Sync the workspace metadata, pull local repos, and install updates.
-By default it uses the active venv parent as the workspace root, so you do not need to `cd` first:
-It respects `tool.uv.workspace.members` and `exclude` when scanning local projects.
+By default it uses the active venv parent as the workspace root, so you do not need to `cd` first.
+It respects `tool.uv.workspace.members` and `exclude` when scanning local projects, and if any
+member directory isn't a Python project yet (no `pyproject.toml`, e.g. a fresh empty clone), it
+warns and skips the `uv sync` step instead of letting uv fail on the whole workspace.
 
 ```bash
 ws-sync
@@ -70,11 +72,15 @@ ws-sync --workspace ~/aai-ws
 
 ### `ws-add`
 
-Add a repo to `repos.txt`, then run `ws-sync`:
+Add a repo to `repos.txt`, then run `ws-sync`. Given `owner/repo`, it clones; given the
+name of an existing local folder (e.g. one just scaffolded with `nbdev-new` or `ship-new`),
+it resolves `owner/repo` from the folder's `origin` remote instead, telling you exactly
+what's missing if the folder has no git repo, no GitHub origin, or no `pyproject.toml`:
 
 ```bash
 ws-add AnswerDotAI/fastws
 ws-add answerdotai/fastws
+ws-add fastws  # existing local folder, resolved via its origin remote
 ```
 
 ### `ws-remove`

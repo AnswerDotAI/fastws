@@ -330,29 +330,45 @@ def ws_sync(
 
     if missing_projects := _sync_ws_pyproject(pyproject_path, template_path, _ws_projects(root)): print(f"Added workspace projects: {', '.join(missing_projects)}")
 
+    if bad := [d.name for d in _ws_dirs(root) if not (d/"pyproject.toml").exists()]:
+        print(f"⚠️  Skipping uv sync, not Python projects yet (scaffold with e.g. nbdev-new or ship-new, or remove): {', '.join(bad)}")
+        return
     subprocess.run(["uv", "sync", "-U"], check=True, cwd=root)
 
 @call_parse
 def ws_add(
-    repo: str,  # Repo to add, e.g. AnswerDotAI/fastws
+    repo: str,  # Repo to add (owner/repo to clone), or an existing local folder name
     workspace: str = "",  # Workspace root; defaults to active venv parent when available
     repos_file: str = "repos.txt",  # Repo list to update
     pyproject_file: str = "pyproject.toml",  # Workspace pyproject to update
     template_file: str = "pyproject.tmpl",  # Template copied when pyproject.toml is missing
 ):
-    "Add a repo to repos.txt and then run ws-sync."
+    "Add a repo to repos.txt (a local folder resolves via its origin remote) and then run ws-sync."
     root = _ws_root(workspace, repos_file, pyproject_file, template_file)
     repos_path = _resolve_path(root, repos_file)
-    repo = _normalize_repo(repo)
+    repo, local = _resolve_add_target(root, repo)
     added = _update_repos_file(repos_path, [repo])
     if added: print(f"Added repo: {repo}")
     else: print(f"Repo already present: {repo}")
-    print(_clone_one(repo, str(root)))
+    if not local: print(_clone_one(repo, str(root)))
     ws_sync(str(root), repos_file, pyproject_file, template_file)
 
 def _is_repo_spec(repo: str) -> bool:
     repo = repo.strip().rstrip("/").removesuffix(".git")
     return bool(_parse_github_repo(repo) or re.fullmatch(r"[^/\s]+/[^/\s]+", repo))
+
+def _resolve_add_target(root: Path, repo: str) -> tuple[str, bool]:
+    "Canonical owner/repo for `repo` and whether it named a local folder, which must be a git repo with a GitHub origin and a pyproject.toml"
+    if _is_repo_spec(repo): return _normalize_repo(repo), False
+    d = root/repo
+    if not d.is_dir(): return _normalize_repo(repo), False  # invalid spec and no such folder: raise the standard error
+    if not (d/".git").exists(): raise SystemExit(f"{d.name} is not a git repository: `git init` it and create a remote, e.g. `gh repo create <owner>/{d.name} --source={d} --push`")
+    res = subprocess.run(["git", "-C", str(d), "remote", "get-url", "origin"], capture_output=True, text=True)
+    if res.returncode != 0 or not (parsed := _parse_github_repo(res.stdout)):
+        raise SystemExit(f"{d.name} has no GitHub 'origin' remote: create one, e.g. `gh repo create <owner>/{d.name} --source={d} --push`")
+    if not (d/"pyproject.toml").exists():
+        raise SystemExit(f"{d.name} has no pyproject.toml: scaffold it first (e.g. `nbdev-new` or `ship-new`), then re-run ws-add")
+    return parsed, True
 
 def _resolve_removal_target(root: Path, repo: str, repos_path: Path) -> str:
     "Canonical owner/repo for `repo`, matching an existing folder name when `repo` isn't a valid spec."
