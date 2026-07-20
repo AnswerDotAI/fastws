@@ -27,6 +27,22 @@ def _repo_key(repo: str) -> str: return repo.strip().rstrip("/").removesuffix(".
 
 def _pkg_key(name: str) -> str: return name.casefold()
 
+def _toml_key(key: str) -> str:
+    return key if re.fullmatch(r"[A-Za-z0-9_-]+", key) else json.dumps(key)
+
+def _toml_value(value) -> str:
+    if isinstance(value, bool): return str(value).lower()
+    if isinstance(value, str): return json.dumps(value)
+    if isinstance(value, (int, float)): return str(value)
+    if isinstance(value, list): return "[" + ", ".join(_toml_value(o) for o in value) + "]"
+    if isinstance(value, dict):
+        if not value: return "{}"
+        return "{ " + ", ".join(f"{_toml_key(str(k))} = {_toml_value(v)}" for k,v in value.items()) + " }"
+    raise TypeError(f"Unsupported TOML value: {value!r}")
+
+def _format_sources(sources: dict) -> str:
+    return "\n".join(f"{_toml_key(str(k))} = {_toml_value(v)}" for k,v in sources.items())
+
 def _dep_key(dep: str) -> str:
     dep = dep.split(";", 1)[0].strip()
     dep = re.split(r"[\s<>=!~]", dep, maxsplit=1)[0]
@@ -115,7 +131,7 @@ def _remove_from_pyproject(pyproject_path: Path, names: list[str]) -> list[str]:
     if not removed: return []
     sources = {k:v for k,v in sources.items() if _pkg_key(k) not in targets}
     deps = [d for d in deps if _dep_key(d) not in targets]
-    content = _replace_table(content, "tool.uv.sources", "\n".join(f"{k} = {{ workspace = true }}" for k in sources))
+    content = _replace_table(content, "tool.uv.sources", _format_sources(sources))
     content = _replace_project_dependencies(content, deps)
     pyproject_path.write_text(content)
     return removed
@@ -190,8 +206,7 @@ def _sync_ws_pyproject(pyproject_path: Path, template_path: Path, projects: list
         if _pkg_key(proj) in dep_keys: continue
         deps.append(proj)
         dep_keys.add(_pkg_key(proj))
-    source_lines = "\n".join(f"{proj} = {{ workspace = true }}" for proj in sources)
-    content = _replace_table(content, "tool.uv.sources", source_lines)
+    content = _replace_table(content, "tool.uv.sources", _format_sources(sources))
     content = _replace_project_dependencies(content, deps)
     pyproject_path.write_text(content)
     return missing
