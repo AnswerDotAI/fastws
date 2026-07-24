@@ -2,7 +2,7 @@
 
 __all__ = ["ws_clone", "ws_pull", "ws_status", "ws_branches", "ws_sync", "ws_add", "ws_remove"]
 
-import ast, fnmatch, json, os, re, shutil, subprocess
+import ast, fnmatch, json, os, re, shutil, subprocess, time
 from pathlib import Path
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
@@ -310,6 +310,31 @@ def ws_branches(
         branch = g.branch(show_current=True).strip()
         print(f"✓ {d}: OK (on {expected})" if branch == expected else f"⚠️  {d}: WARNING (on {branch})")
 
+def _upgrade_stamp(root: Path) -> Path:
+    "Stamp whose mtime records the last dependency upgrade; kept inside .git (never tracked) when the root is a git repo."
+    gitdir = root/".git"
+    return gitdir/"fastws-upgraded" if gitdir.is_dir() else root/".fastws-upgraded"
+
+def _should_upgrade(root: Path, max_age: float = 86400) -> bool:
+    "True when this workspace hasn't upgraded dependencies within `max_age` seconds."
+    stamp = _upgrade_stamp(root)
+    return not stamp.exists() or time.time() - stamp.stat().st_mtime > max_age
+
+def _cargo_update(root: Path, workers: int = 16):
+    "Float each member crate's Cargo.lock to latest matching versions, in parallel; prints what moved."
+    crates = [d for d in _ws_dirs(root) if (d/"Cargo.toml").exists()]
+    if not crates: return
+
+    def upd(d):
+        res = subprocess.run(["cargo", "update"], cwd=d, capture_output=True, text=True)
+        return d.name, res.returncode, (res.stdout or "") + (res.stderr or "")
+
+    with ThreadPoolExecutor(max_workers=workers) as ex:
+        for name, code, out in ex.map(upd, crates):
+            if code: print(f"⚠️  {name}: cargo update failed\n{out}")
+            elif lines := [l for l in out.splitlines() if l.lstrip().startswith(("Updating ", "Adding ", "Removing "))]:
+                print(f"{name}:\n" + "\n".join(lines))
+
 @call_parse
 def ws_sync(
     workspace: str = "",  # Workspace root; defaults to active venv parent when available
@@ -317,8 +342,9 @@ def ws_sync(
     pyproject_file: str = "pyproject.toml",  # Workspace pyproject to update
     template_file: str = "pyproject.tmpl",  # Template copied when pyproject.toml is missing
     workers: int = 16,  # Number of parallel workers
+    upgrade: bool = False,  # Force the once-daily dependency upgrade pass
 ):
-    "Sync workspace metadata and run uv sync -U."
+    "Sync workspace metadata and run uv sync; at most once per day (or with `upgrade`), float dependencies with uv sync -U plus cargo update in member crates."
     root = _ws_root(workspace, repos_file, pyproject_file, template_file)
     repos_path = _resolve_path(root, repos_file)
     pyproject_path = _resolve_path(root, pyproject_file)
@@ -333,7 +359,11 @@ def ws_sync(
     if bad := [d.name for d in _ws_dirs(root) if not (d/"pyproject.toml").exists()]:
         print(f"⚠️  Skipping uv sync, not Python projects yet (scaffold with e.g. nbdev-new or ship-new, or remove): {', '.join(bad)}")
         return
-    subprocess.run(["uv", "sync", "-U"], check=True, cwd=root)
+    up = upgrade or _should_upgrade(root)
+    subprocess.run(["uv", "sync", "-U"] if up else ["uv", "sync"], check=True, cwd=root)
+    if up:
+        _cargo_update(root, workers=workers)
+        _upgrade_stamp(root).touch()
 
 @call_parse
 def ws_add(

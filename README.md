@@ -65,9 +65,15 @@ It respects `tool.uv.workspace.members` and `exclude` when scanning local projec
 member directory isn't a Python project yet (no `pyproject.toml`, e.g. a fresh empty clone), it
 warns and skips the `uv sync` step instead of letting uv fail on the whole workspace.
 
+At most once per day (tracked by a stamp file inside the workspace's `.git`, so git never
+sees it), the sync also floats dependencies: `uv sync -U` instead of plain `uv sync`, plus
+a parallel `cargo update` in every member with a `Cargo.toml`, printing what moved. Pass
+`--upgrade` to force that pass regardless of when it last ran.
+
 ```bash
 ws-sync
 ws-sync --workspace ~/aai-ws
+ws-sync --upgrade
 ```
 
 ### `ws-add`

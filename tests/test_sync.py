@@ -463,3 +463,38 @@ def test_ws_add_dir_form_errors_name_the_missing_piece(tmp_path, monkeypatch):
     monkeypatch.setattr(core.subprocess, "run", with_origin)
     with pytest.raises(SystemExit, match="pyproject"):
         core.ws_add("newproj", workspace=str(tmp_path))
+
+
+def test_ws_sync_upgrades_at_most_daily(tmp_path, monkeypatch):
+    import os, time
+    (tmp_path/"repos.txt").write_text("")
+    (tmp_path/"pyproject.tmpl").write_text('[project]\nname = "uvws"\ndependencies = [\n]\n\n[tool.uv.sources]\n\n')
+    crate = tmp_path/"crate"
+    crate.mkdir()
+    (crate/"pyproject.toml").write_text('[project]\nname = "crate"\n')
+    (crate/"Cargo.toml").write_text('[package]\nname = "crate"\n')
+    calls = []
+
+    def fake_run(cmd, **kwargs):
+        calls.append(cmd)
+        class Res: stdout = ""; stderr = ""; returncode = 0
+        return Res()
+
+    monkeypatch.setattr(core.subprocess, "run", fake_run)
+
+    core.ws_sync(workspace=str(tmp_path))    # first sync of the day: full float
+    assert ["uv", "sync", "-U"] in calls and ["cargo", "update"] in calls
+
+    calls.clear()
+    core.ws_sync(workspace=str(tmp_path))    # stamp is fresh: plain sync
+    assert ["uv", "sync"] in calls and ["cargo", "update"] not in calls
+
+    old = time.time() - 90000
+    os.utime(core._upgrade_stamp(tmp_path), (old, old))
+    calls.clear()
+    core.ws_sync(workspace=str(tmp_path))    # stamp >24h old: floats again
+    assert ["uv", "sync", "-U"] in calls and ["cargo", "update"] in calls
+
+    calls.clear()
+    core.ws_sync(workspace=str(tmp_path), upgrade=True)    # force flag overrides a fresh stamp
+    assert ["uv", "sync", "-U"] in calls and ["cargo", "update"] in calls
