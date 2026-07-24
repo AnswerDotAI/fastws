@@ -40,6 +40,26 @@ def test_sync_workspace_pyproject_copies_template_and_adds_projects(tmp_path):
     assert '"beta"' in content
 
 
+def test_sync_workspace_pyproject_preserves_non_workspace_sources(tmp_path):
+    pyproject = tmp_path/"pyproject.toml"
+    pyproject.write_text(
+        '[project]\nname = "uvws"\ndependencies = [\n    "torch",\n]\n\n'
+        '[tool.uv.sources]\ntorch = [{ index = "pytorch-cu128" }]\n\n'
+        '[[tool.uv.index]]\nname = "pytorch-cu128"\nurl = "https://download.pytorch.org/whl/cu128"\nexplicit = true\n'
+    )
+    alpha = tmp_path/"alpha"
+    alpha.mkdir()
+    (alpha/"pyproject.toml").write_text('[project]\nname = "alpha"\n')
+
+    added = core._sync_ws_pyproject(pyproject, tmp_path/"pyproject.tmpl", ["alpha"])
+    content = pyproject.read_text()
+
+    assert added == ["alpha"]
+    assert 'torch = [{ index = "pytorch-cu128" }]' in content
+    assert 'alpha = { workspace = true }' in content
+    assert 'name = "pytorch-cu128"' in content
+
+
 def test_sync_workspace_pyproject_skips_case_only_source_differences(tmp_path):
     pyproject = tmp_path/"pyproject.toml"
     pyproject.write_text('[project]\nname = "uvws"\ndependencies = ["FastWS"]\n\n[tool.uv.sources]\nFastWS = { workspace = true }\n')

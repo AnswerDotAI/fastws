@@ -190,8 +190,11 @@ def _sync_ws_pyproject(pyproject_path: Path, template_path: Path, projects: list
         if _pkg_key(proj) in dep_keys: continue
         deps.append(proj)
         dep_keys.add(_pkg_key(proj))
-    source_lines = "\n".join(f"{proj} = {{ workspace = true }}" for proj in sources)
-    content = _replace_table(content, "tool.uv.sources", source_lines)
+    new_lines = "".join(f"{proj} = {{ workspace = true }}\n" for proj in missing)
+    if span := _table_span(content, "tool.uv.sources"):
+        pos = content.index("\n", span[0])+1
+        content = content[:pos] + new_lines + content[pos:]
+    else: content = content.rstrip() + f"\n\n[tool.uv.sources]\n{new_lines}\n"
     content = _replace_project_dependencies(content, deps)
     pyproject_path.write_text(content)
     return missing
