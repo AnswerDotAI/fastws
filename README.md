@@ -101,3 +101,31 @@ ws-remove AnswerDotAI/fastws
 ws-remove fastws  # bare folder name also works if the directory exists
 ```
 
+### `ws-releases`
+
+Report repos with commits since their newest GitHub release, so nothing reviewed sits unshipped:
+
+```bash
+ws-releases                 # sweep every repo in repos.txt
+ws-releases solveit         # only solveit's transitive workspace dependencies
+ws-releases --skip 'wip'    # extra start-of-message regex for commits that need no release
+```
+
+Each pending repo lists its unreleased commit summaries; repos with no releases yet get one quiet `no releases:` line, and fully-released repos appear in `up to date:`. The newest release is picked by version number (publish timestamps can be out of order), and repos whose default branch isn't `main` are handled automatically.
+
+Commits whose message matches a start-anchored regex from the skip set need no release and aren't reported. The built-in set covers version bumps and housekeeping (`bump`, `nbdev regen`, `.gitignore`, `docs`, `CI`, ...: `DEFAULT_SKIP` in `fastws.releases`); `[tool.fastws]` in the workspace root `pyproject.toml` adds to it, and names repos that should never be swept (apps that deploy rather than release):
+
+```toml
+[tool.fastws]
+release_skip = ["docs only"]
+release_exclude = ["solveit", "md_site"]
+```
+
+From Python (the primary interface - the CLI is a thin wrapper over `fastws.releases`):
+
+```python
+from fastws import check_releases, check_release
+await check_releases()            # ReleaseReport: the repr is the report
+await check_releases('solveit')   # dependency-closure mode
+await check_release('mdhtml')     # one repo: list of unreleased commit summaries (None = no releases)
+```

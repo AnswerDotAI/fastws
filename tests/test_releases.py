@@ -1,0 +1,60 @@
+import asyncio
+from pathlib import Path
+
+from fastcore.basics import AttrDict
+
+import fastws.releases as relmod
+
+
+def _rel(tag): return AttrDict(tag_name=tag)
+
+
+def test_newest_tag_by_version_not_publish_order():
+    assert relmod._newest_tag([_rel("v0.1.17"), _rel("v0.1.18"), _rel("v0.1.9")]) == "v0.1.18"
+    assert relmod._newest_tag([]) is None
+
+
+def test_skip_pats_defaults_and_config(tmp_path):
+    (tmp_path/"pyproject.toml").write_text('[tool.fastws]\nrelease_skip = ["docs only"]\n', encoding="utf-8")
+    pats = relmod._skip_pats("wip", root=tmp_path)
+    hits = lambda m: any(p.match(m) for p in pats)
+    assert hits("bump") and hits("Bump version to 0.2.2") and hits("update .gitignore")
+    assert hits("docs only: fix typo")  # workspace config
+    assert hits("wip checkpoint")       # per-call extra
+    assert not hits("bumpy road ahead") # bump$ is anchored
+    assert not hits("fixes #30")
+    for m in (".gitignore", "gitignore", "docs", "doc", "clean", "CI", "meta", "ignore", "allowed_metadata_keys"): assert hits(m)
+    for m in ("deps", "CI fixups", "document the API", "cleanup tests"): assert not hits(m)  # deps IS release-worthy; anchored bare words only
+
+
+def test_member_graph_and_closure(tmp_path):
+    (tmp_path/"app").mkdir(); (tmp_path/"libx").mkdir(); (tmp_path/"liby").mkdir(); (tmp_path/"other").mkdir()
+    (tmp_path/"app/pyproject.toml").write_text('[project]\nname = "app"\ndependencies = ["libx>=1.0"]\n', encoding="utf-8")
+    (tmp_path/"libx/pyproject.toml").write_text('[project]\nname = "libx"\ndependencies = ["liby[full]", "requests"]\n', encoding="utf-8")
+    (tmp_path/"liby/pyproject.toml").write_text('[project]\nname = "liby"\n', encoding="utf-8")
+    (tmp_path/"other/pyproject.toml").write_text('[project]\nname = "other"\n', encoding="utf-8")
+
+    graph = relmod._member_graph(tmp_path)
+    assert relmod._closure("app", graph) == {"app", "libx", "liby"}  # transitive, extras stripped, non-members dropped
+
+
+def test_release_report_repr():
+    rep = relmod.ReleaseReport([("mdhtml", ["fixes #30"]), ("solveit", None), ("fastcore", []), ("bad", ValueError("boom"))])
+    txt = repr(rep)
+    assert "mdhtml (1 unreleased):" in txt and "  - fixes #30" in txt
+    assert "no releases: solveit" in txt
+    assert "up to date: fastcore" in txt
+    assert "bad: ERROR boom" in txt
+
+
+def test_release_exclude(tmp_path, monkeypatch):
+    (tmp_path/"repos.txt").write_text("AnswerDotAI/libx\nAnswerDotAI/appy\n", encoding="utf-8")
+    (tmp_path/"pyproject.toml").write_text('[tool.fastws]\nrelease_exclude = ["Appy"]\n', encoding="utf-8")
+    checked = []
+    async def fake(repo, skip=None): return checked.append(repo) or []
+    monkeypatch.setattr(relmod, "check_release", fake)
+
+    rep = asyncio.run(relmod.check_releases(workspace=str(tmp_path)))
+
+    assert checked == ["AnswerDotAI/libx"]  # appy excluded, case-insensitively
+    assert [r for r, _ in rep] == ["libx"]
