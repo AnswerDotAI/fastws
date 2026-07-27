@@ -50,6 +50,26 @@ def test_sync_workspace_pyproject_skips_case_only_source_differences(tmp_path):
     assert pyproject.read_text() == '[project]\nname = "uvws"\ndependencies = ["FastWS"]\n\n[tool.uv.sources]\nFastWS = { workspace = true }\n'
 
 
+def test_sync_workspace_pyproject_preserves_non_workspace_sources(tmp_path):
+    pyproject = tmp_path/"pyproject.toml"
+    pyproject.write_text(
+        '[project]\nname = "uvws"\ndependencies = ["torch"]\n\n'
+        '[tool.uv.sources]\n'
+        'torch = { index = "pytorch" }\n'
+        'platform-pkg = [{ index = "linux", marker = "sys_platform == \'linux\'" }]\n\n'
+        '[[tool.uv.index]]\nname = "pytorch"\nurl = "https://download.pytorch.org/whl/cu124"\nexplicit = true\n'
+    )
+
+    added = core._sync_ws_pyproject(pyproject, tmp_path/"pyproject.tmpl", ["localpkg"])
+    content = pyproject.read_text()
+
+    assert added == ["localpkg"]
+    assert 'torch = { index = "pytorch" }' in content
+    assert "platform-pkg = [{ index = \"linux\", marker = \"sys_platform == 'linux'\" }]" in content
+    assert 'localpkg = { workspace = true }' in content
+    assert '[[tool.uv.index]]\nname = "pytorch"' in content
+
+
 def test_workspace_projects_skip_excluded_dirs_and_template_names(tmp_path):
     (tmp_path/"pyproject.toml").write_text('[tool.uv.workspace]\nmembers = ["./*"]\nexclude = ["skip-*"]\n')
     keep = tmp_path/"keep"
@@ -221,6 +241,21 @@ def test_remove_from_pyproject_returns_empty_when_absent(tmp_path):
 
     assert removed == []
     assert pyproject.read_text() == original
+
+
+def test_remove_from_pyproject_preserves_non_workspace_sources(tmp_path):
+    pyproject = tmp_path/"pyproject.toml"
+    pyproject.write_text(
+        '[project]\nname = "uvws"\ndependencies = ["localpkg", "torch"]\n\n'
+        '[tool.uv.sources]\nlocalpkg = { workspace = true }\ntorch = { index = "pytorch" }\n'
+    )
+
+    removed = core._remove_from_pyproject(pyproject, ["localpkg"])
+    content = pyproject.read_text()
+
+    assert removed == ["localpkg"]
+    assert "localpkg" not in content
+    assert 'torch = { index = "pytorch" }' in content
 
 
 def _setup_remove_ws(tmp_path):
