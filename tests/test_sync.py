@@ -21,6 +21,116 @@ def test_update_repos_file_is_case_insensitive(tmp_path):
     assert repos_path.read_text() == "AnswerDotAI/fastws\n"
 
 
+def test_load_repo_entries_resolves_locations(tmp_path):
+    repos_path = tmp_path/"repos.txt"
+    repos_path.write_text("AnswerDotAI/fastws\njph00/private ~/private\nfastai/fastai sub/dir\n")
+
+    entries = core._load_repo_entries(repos_path, tmp_path)
+
+    assert entries == [
+        ("AnswerDotAI/fastws", tmp_path/"fastws"),
+        ("jph00/private", core.Path("~/private").expanduser()),
+        ("fastai/fastai", tmp_path/"sub"/"dir"),
+    ]
+
+
+def test_load_repos_returns_specs_only(tmp_path):
+    repos_path = tmp_path/"repos.txt"
+    repos_path.write_text("jph00/private ~/private\n# comment\n\nAnswerDotAI/fastws\n")
+
+    assert core._load_repos(repos_path) == ["jph00/private", "AnswerDotAI/fastws"]
+
+
+def test_update_repos_file_matches_lines_with_locations(tmp_path):
+    repos_path = tmp_path/"repos.txt"
+    repos_path.write_text("jph00/private ~/private\n")
+
+    added = core._update_repos_file(repos_path, ["jph00/private"])
+
+    assert added == []
+    assert repos_path.read_text() == "jph00/private ~/private\n"
+
+
+def test_remove_from_repos_file_matches_lines_with_locations(tmp_path):
+    repos_path = tmp_path/"repos.txt"
+    repos_path.write_text("AnswerDotAI/keep\njph00/private ~/private\n")
+
+    removed = core._remove_from_repos_file(repos_path, "jph00/private")
+
+    assert removed is True
+    assert repos_path.read_text() == "AnswerDotAI/keep\n"
+
+
+def test_home_relative_compresses_home_paths(tmp_path, monkeypatch):
+    monkeypatch.setenv("HOME", str(tmp_path))
+    assert core._home_relative(str(tmp_path/"private")) == "~/private"
+    assert core._home_relative("~/private") == "~/private"
+    assert core._home_relative("/opt/elsewhere") == "/opt/elsewhere"
+
+
+def test_external_projects_discovers_root_and_subdir_packages(tmp_path):
+    root = tmp_path/"ws"
+    root.mkdir()
+    single = tmp_path/"single"
+    single.mkdir()
+    (single/"pyproject.toml").write_text('[project]\nname = "singlepkg"\n')
+    multi = tmp_path/"multi"
+    (multi/"notes").mkdir(parents=True)
+    (multi/"tool1").mkdir()
+    (multi/"tool1"/"pyproject.toml").write_text('[project]\nname = "tool1"\n')
+    (multi/"tmpl").mkdir()
+    (multi/"tmpl"/"pyproject.toml").write_text('[project]\nname = "{repo}"\n')
+
+    res = core._external_projects(root, [single, multi, tmp_path/"missing"])
+
+    assert res == [("singlepkg", "../single"), ("tool1", "../multi/tool1")]
+
+
+def test_sync_ws_pyproject_adds_external_path_sources(tmp_path):
+    pyproject = tmp_path/"pyproject.toml"
+    pyproject.write_text('[project]\nname = "uvws"\ndependencies = [\n]\n\n[tool.uv.sources]\n\n')
+
+    added = core._sync_ws_pyproject(pyproject, tmp_path/"pyproject.tmpl", [], [("tool1", "../multi/tool1")])
+    content = pyproject.read_text()
+
+    assert added == ["tool1"]
+    assert 'tool1 = { path = "../multi/tool1", editable = true }' in content
+    assert '"tool1"' in content
+
+    added = core._sync_ws_pyproject(pyproject, tmp_path/"pyproject.tmpl", [], [("tool1", "../multi/tool1")])
+    assert added == []
+    assert pyproject.read_text() == content
+
+def test_sync_ws_excludes_generates_from_intent_and_auto(tmp_path):
+    pyproject = tmp_path/"pyproject.toml"
+    pyproject.write_text(
+        '[project]\nname = "uvws"\n\n[tool.uv.workspace]\nmembers = ["./*"]\n'
+        'exclude = ["_*", "tmp", "example", "stale"]\n\n[tool.fastws]\nexclude = ["wanted-out"]\n')
+    for name in ["junk", "fresh-clone", "realpkg", "tmpl", "example", "stale", "wanted-out"]: (tmp_path/name).mkdir()
+    (tmp_path/"realpkg"/"pyproject.toml").write_text('[project]\nname = "realpkg"\n')
+    (tmp_path/"tmpl"/"pyproject.toml").write_text('[project]\nname = "{repo}"\n')
+    (tmp_path/"example"/"pyproject.toml").write_text('[project]\nname = "example"\n')
+    (tmp_path/"stale"/"pyproject.toml").write_text('[project]\nname = "stale"\n')
+    (tmp_path/"wanted-out"/"pyproject.toml").write_text('[project]\nname = "wanted-out"\n')
+
+    added, removed = core._sync_ws_excludes(pyproject, tmp_path, {"fresh-clone", "example"})
+    data = core.tomllib.loads(pyproject.read_text())
+    new = data["tool"]["uv"]["workspace"]["exclude"]
+
+    # kept: glob, missing dir, tracked; auto: junk + placeholder tmpl; intent: wanted-out; dropped: untracked valid project
+    assert set(new) == {"_*", "tmp", "example", "wanted-out", "junk", "tmpl"}
+    assert added == ["wanted-out", "junk", "tmpl"]
+    assert removed == ["stale"]
+    assert data["tool"]["fastws"]["exclude"] == ["wanted-out"]  # fastws table untouched
+
+    # idempotent: second run changes nothing
+    content = pyproject.read_text()
+    assert core._sync_ws_excludes(pyproject, tmp_path, {"fresh-clone", "example"}) == ([], [])
+    assert pyproject.read_text() == content
+
+
+
+
 def test_sync_workspace_pyproject_copies_template_and_adds_projects(tmp_path):
     (tmp_path/"pyproject.tmpl").write_text('[project]\nname = "uvws"\ndependencies = [\n    "ipython>=8.34.0",\n]\n\n[tool.uv.sources]\n\n')
     alpha = tmp_path/"alpha"
@@ -48,6 +158,21 @@ def test_sync_workspace_pyproject_skips_case_only_source_differences(tmp_path):
 
     assert added == []
     assert pyproject.read_text() == '[project]\nname = "uvws"\ndependencies = ["FastWS"]\n\n[tool.uv.sources]\nFastWS = { workspace = true }\n'
+
+
+def test_sync_workspace_pyproject_preserves_path_sources(tmp_path):
+    pyproject = tmp_path/"pyproject.toml"
+    pyproject.write_text('[project]\nname = "uvws"\ndependencies = [\n    "mytool",\n]\n\n[tool.uv.sources]\nmytool = { path = "../private/mytool", editable = true }\n')
+    alpha = tmp_path/"alpha"
+    alpha.mkdir()
+    (alpha/"pyproject.toml").write_text('[project]\nname = "alpha"\n')
+
+    added = core._sync_ws_pyproject(pyproject, tmp_path/"pyproject.tmpl", ["alpha"])
+    content = pyproject.read_text()
+
+    assert added == ["alpha"]
+    assert 'mytool = { path = "../private/mytool", editable = true }' in content
+    assert 'alpha = { workspace = true }' in content
 
 
 def test_workspace_projects_skip_excluded_dirs_and_template_names(tmp_path):
@@ -175,7 +300,7 @@ def test_ws_add_clones_and_syncs(tmp_path, monkeypatch):
     core.ws_add("answerdotai/fastws", workspace=str(tmp_path))
 
     assert (tmp_path/"repos.txt").read_text() == "AnswerDotAI/existing\nanswerdotai/fastws\n"
-    assert clone_calls == [("answerdotai/fastws", str(tmp_path))]
+    assert clone_calls == [("answerdotai/fastws", tmp_path/"fastws")]
     assert sync_calls == [(str(tmp_path), "repos.txt", "pyproject.toml", "pyproject.tmpl")]
 
 
@@ -221,6 +346,17 @@ def test_remove_from_pyproject_returns_empty_when_absent(tmp_path):
 
     assert removed == []
     assert pyproject.read_text() == original
+
+
+def test_remove_from_pyproject_preserves_path_sources(tmp_path):
+    pyproject = tmp_path/"pyproject.toml"
+    pyproject.write_text('[project]\nname = "uvws"\ndependencies = [\n    "alpha",\n    "mytool",\n]\n\n[tool.uv.sources]\nalpha = { workspace = true }\nmytool = { path = "../private/mytool", editable = true }\n')
+
+    removed = core._remove_from_pyproject(pyproject, ["alpha"])
+    content = pyproject.read_text()
+
+    assert removed == ["alpha"]
+    assert 'mytool = { path = "../private/mytool", editable = true }' in content
 
 
 def _setup_remove_ws(tmp_path):
@@ -347,7 +483,7 @@ def test_ws_status_summarizes_unpushed_commits_by_default(tmp_path, monkeypatch,
         def log(self, *args, **kwargs): return "abc first commit"
 
     monkeypatch.chdir(tmp_path)
-    monkeypatch.setattr(core, "_load_repos", lambda repos_file="repos.txt": ["AnswerDotAI/repo1"])
+    monkeypatch.setattr(core, "_load_repo_entries", lambda *a: [("AnswerDotAI/repo1", core.Path("repo1"))])
     monkeypatch.setattr(core, "Git", FakeGit)
 
     core.ws_status()
@@ -368,7 +504,7 @@ def test_ws_status_ignores_unpushed_commits_off_main_by_default(tmp_path, monkey
         def log(self, *args, **kwargs): return "abc first commit"
 
     monkeypatch.chdir(tmp_path)
-    monkeypatch.setattr(core, "_load_repos", lambda repos_file="repos.txt": ["AnswerDotAI/repo1"])
+    monkeypatch.setattr(core, "_load_repo_entries", lambda *a: [("AnswerDotAI/repo1", core.Path("repo1"))])
     monkeypatch.setattr(core, "Git", FakeGit)
 
     core.ws_status()
@@ -387,7 +523,7 @@ def test_ws_status_shows_unpushed_commits_with_branches_flag(tmp_path, monkeypat
         def log(self, *args, **kwargs): return "abc first commit"
 
     monkeypatch.chdir(tmp_path)
-    monkeypatch.setattr(core, "_load_repos", lambda repos_file="repos.txt": ["AnswerDotAI/repo1"])
+    monkeypatch.setattr(core, "_load_repo_entries", lambda *a: [("AnswerDotAI/repo1", core.Path("repo1"))])
     monkeypatch.setattr(core, "Git", FakeGit)
 
     core.ws_status(branches=True)

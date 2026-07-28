@@ -19,6 +19,17 @@ AnswerDotAI/fastship
 AnswerDotAI/fastws
 ```
 
+A line may add a checkout location after the repo, for repos that live outside
+the workspace root (`~` ok). Every command then reads and writes them there, and
+`ws-sync` editable-installs each Python project found inside (the repo root if it
+has a `pyproject.toml`, else its immediate subdirectories), so one out-of-tree
+repo can hold several small packages alongside non-Python content:
+
+```
+AnswerDotAI/fastcore
+jph00/private ~/private
+```
+
 ## Commands
 
 ### `ws-clone`
@@ -65,6 +76,14 @@ It respects `tool.uv.workspace.members` and `exclude` when scanning local projec
 member directory isn't a Python project yet (no `pyproject.toml`, e.g. a fresh empty clone), it
 warns and skips the `uv sync` step instead of letting uv fail on the whole workspace.
 
+The workspace `exclude` list is auto-managed: a top-level directory that isn't a valid Python
+project and isn't a `repos.txt` checkout gets excluded automatically, and is un-excluded once it
+gains a real `pyproject.toml`. Globs, entries for missing directories, and entries for `repos.txt`
+checkouts are always kept, and `exclude = [...]` under `[tool.fastws]` in the workspace
+`pyproject.toml` declares intent the scan can't infer (e.g. keeping a real project out of the
+workspace). Hand-written `[tool.uv.sources]` entries (path, git, ...) are preserved when syncing
+adds new members.
+
 At most once per day (tracked by a stamp file inside the workspace's `.git`, so git never
 sees it), the sync also floats dependencies: `uv sync -U` instead of plain `uv sync`, plus
 a parallel `cargo update` in every member with a `Cargo.toml`, printing what moved. Pass
@@ -81,12 +100,15 @@ ws-sync --upgrade
 Add a repo to `repos.txt`, then run `ws-sync`. Given `owner/repo`, it clones; given the
 name of an existing local folder (e.g. one just scaffolded with `nbdev-new` or `ship-new`),
 it resolves `owner/repo` from the folder's `origin` remote instead, telling you exactly
-what's missing if the folder has no git repo, no GitHub origin, or no `pyproject.toml`:
+what's missing if the folder has no git repo, no GitHub origin, or no `pyproject.toml`.
+Given a path outside the workspace root, the repo stays where it is and its location is
+recorded in `repos.txt` (no root `pyproject.toml` needed: its packages are discovered on sync):
 
 ```bash
 ws-add AnswerDotAI/fastws
 ws-add answerdotai/fastws
 ws-add fastws  # existing local folder, resolved via its origin remote
+ws-add ~/private  # a path outside the workspace: stays where it is, recorded in repos.txt with its location
 ```
 
 ### `ws-remove`
