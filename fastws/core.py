@@ -442,10 +442,9 @@ def ws_sync(
         print(f"⚠️  Skipping uv sync, not Python projects yet (scaffold with e.g. nbdev-new or ship-new, or remove): {', '.join(bad)}")
         return
     up = upgrade or _should_upgrade(root)
+    if up: _cargo_update(root, workers=workers)
     subprocess.run(["uv", "sync", "-U"] if up else ["uv", "sync"], check=True, cwd=root)
-    if up:
-        _cargo_update(root, workers=workers)
-        _upgrade_stamp(root).touch()
+    if up: _upgrade_stamp(root).touch()
 
 @call_parse
 def ws_add(
