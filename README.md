@@ -130,10 +130,13 @@ ws-remove fastws  # bare folder name also works if the directory exists
 Report repos with commits since their newest GitHub release, so nothing reviewed sits unshipped:
 
 ```bash
-ws-releases                 # sweep every repo in repos.txt
+ws-releases                 # at the workspace root: sweep every repo in repos.txt
 ws-releases solveit         # only solveit's transitive workspace dependencies
+ws-releases --nodeps        # inside a repo: just that repo
 ws-releases --skip 'wip'    # extra start-of-message regex for commits that need no release
 ```
+
+Run from inside a workspace checkout, the sweep narrows to that repo and its transitive workspace dependencies; `--nodeps` narrows it to the repo alone (an error when no project is in play).
 
 Each pending repo lists its unreleased commit summaries; repos with no releases yet get one quiet `no releases:` line, and fully-released repos appear in `up to date:`. The newest release is picked by version number (publish timestamps can be out of order), and repos whose default branch isn't `main` are handled automatically.
 

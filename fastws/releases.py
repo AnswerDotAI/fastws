@@ -10,7 +10,7 @@ from fastcore.parallel import parallel_async
 from ghapi.core import APIError, GhApi, dep_closure, local_dep_graph
 from packaging.version import InvalidVersion, Version
 
-from .core import _load_repos, _resolve_path, _ws_root
+from .core import _load_repo_entries, _load_repos, _resolve_path, _ws_root
 
 try: import tomllib
 except ModuleNotFoundError: import tomli as tomllib
@@ -65,14 +65,26 @@ class ReleaseReport(list):
         if clean: out.append(f"up to date: {' '.join(clean)}")
         return "\n".join(out) or "nothing to check"
 
-async def check_releases(project: str = None, skip=None, workspace: str = "", repos_file: str = "repos.txt") -> ReleaseReport:
-    "Sweep every workspace repo (or `project`'s transitive dependency closure) for unreleased commits; `[tool.fastws].release_exclude` names repos to leave out (apps that deploy rather than release)."
+def _cwd_project(root: Path, repos_file: str = "repos.txt") -> str|None:
+    "Dir name of the workspace member checkout containing cwd (None at the root or outside every member)."
+    cwd = Path.cwd().resolve()
+    for _, d in _load_repo_entries(_resolve_path(root, repos_file), root):
+        if cwd.is_relative_to(d.resolve()): return d.name
+    return None
+
+async def check_releases(project: str = None, skip=None, workspace: str = "", repos_file: str = "repos.txt", nodeps: bool = False) -> ReleaseReport:
+    "Sweep every workspace repo for unreleased commits; a `project` (given, or detected from cwd inside a member checkout) limits the sweep to its transitive dependency closure, or to itself alone with `nodeps`. `[tool.fastws].release_exclude` names repos to leave out (apps that deploy rather than release)."
     root = _ws_root(workspace)
     repos = _load_repos(_resolve_path(root, repos_file))
     excl = {e.casefold() for e in _fastws_cfg(root).get("release_exclude", [])}
     repos = [r for r in repos if r.split("/")[-1].casefold() not in excl]
+    if project is None: project = _cwd_project(root, repos_file)
+    if nodeps and not project: raise SystemExit("nodeps requires a project: pass one, or run from inside a repo")
     if project:
-        dirs = dep_closure(project, local_dep_graph(root))
+        g = local_dep_graph(root)
+        key = project.casefold()
+        if key not in g: key = next((k for k, v in g.items() if v[0].casefold() == key), key)
+        dirs = {g[key][0]} if nodeps else dep_closure(key, g)
         repos = [r for r in repos if r.split("/")[-1] in dirs]
     pats = _skip_pats(skip, root)
     res = await parallel_async(check_release, repos, skip=pats, return_exceptions=True)
@@ -80,10 +92,11 @@ async def check_releases(project: str = None, skip=None, workspace: str = "", re
 
 @call_parse
 async def ws_releases(
-    project: str = None,  # Limit to this package's transitive workspace dependencies (default: all repos)
+    project: str = None,  # Limit to this package's transitive workspace dependencies (default: the repo containing cwd, if any)
     skip: str = None,  # Extra start-of-message regex for commits that need no release
     workspace: str = "",  # Workspace root (defaults to the active venv's parent, else cwd)
     repos_file: str = "repos.txt",  # File containing repo list
+    nodeps: bool = False,  # Report only the project itself, not its dependency closure
 ):
     "Report workspace repos with commits since their newest release."
-    print(repr(await check_releases(project=project, skip=skip, workspace=workspace, repos_file=repos_file)))
+    print(repr(await check_releases(project=project, skip=skip, workspace=workspace, repos_file=repos_file, nodeps=nodeps)))
