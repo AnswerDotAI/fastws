@@ -2,7 +2,7 @@
 
 __all__ = ["ws_clone", "ws_pull", "ws_status", "ws_branches", "ws_sync", "ws_add", "ws_remove"]
 
-import ast, fnmatch, json, os, re, shutil, subprocess, time
+import ast, fnmatch, hashlib, json, os, re, shutil, subprocess, time
 from pathlib import Path
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
@@ -396,6 +396,68 @@ def _should_upgrade(root: Path, max_age: float = 86400) -> bool:
     stamp = _upgrade_stamp(root)
     return not stamp.exists() or time.time() - stamp.stat().st_mtime > max_age
 
+_CARGO_KEY = Path(".git/fastws-cargo-key")
+
+def _cargo_patches(root: Path):
+    "Local Cargo patches keyed by normalized Git URL and package name, plus their config file."
+    config = root/".cargo"/"config.toml"
+    if not config.exists(): return {}, None
+    data = tomllib.loads(config.read_text())
+    patches = {}
+    for url, entries in data.get("patch", {}).items():
+        for name, spec in entries.items():
+            if not isinstance(spec, dict) or not (path := spec.get("path")): continue
+            path = Path(path).expanduser()
+            patches[(_repo_key(url), name)] = path if path.is_absolute() else (config.parent/path).resolve()
+    return patches, config
+
+def _cargo_dep_tables(data):
+    for name in "dependencies","build-dependencies": yield data.get(name, {})
+    for target in data.get("target", {}).values():
+        for name in "dependencies","build-dependencies": yield target.get(name, {})
+
+def _patched_cargo_deps(crate: Path, patches):
+    data = tomllib.loads((crate/"Cargo.toml").read_text())
+    for deps in _cargo_dep_tables(data):
+        for name, spec in deps.items():
+            if not isinstance(spec, dict) or not (url := spec.get("git")): continue
+            if path := patches.get((_repo_key(url), spec.get("package", name))): yield path
+
+def _cargo_input_files(crate: Path):
+    for name in "Cargo.toml","build.rs":
+        if (path := crate/name).exists(): yield path
+    src = crate/"src"
+    if src.exists(): yield from sorted(path for path in src.rglob("*") if path.is_file())
+
+def _cargo_key(crate: Path, patches, config):
+    h = hashlib.sha256()
+    def add(path, name):
+        h.update(name.encode())
+        h.update(b"\0")
+        if path.exists(): h.update(path.read_bytes())
+        h.update(b"\0")
+    add(crate/"Cargo.lock", "Cargo.lock")
+    if config: add(config, ".cargo/config.toml")
+    seen = set()
+    def add_dep(dep):
+        dep = dep.resolve()
+        if dep in seen: return
+        seen.add(dep)
+        for path in _cargo_input_files(dep): add(path, f"{dep.name}/{path.relative_to(dep)}")
+        for child in _patched_cargo_deps(dep, patches): add_dep(child)
+    for dep in _patched_cargo_deps(crate, patches): add_dep(dep)
+    return h.hexdigest()
+
+def _sync_cargo_keys(root: Path):
+    "Update content-derived uv keys for workspace crates, without touching unchanged keys."
+    patches, config = _cargo_patches(root)
+    for crate in (d for d in _ws_dirs(root) if (d/"Cargo.toml").exists()):
+        key = crate/_CARGO_KEY
+        if not key.parent.is_dir(): continue
+        value = _cargo_key(crate, patches, config)
+        if key.exists() and key.read_text().strip() == value: continue
+        key.write_text(value + "\n")
+
 def _cargo_update(root: Path, workers: int = 16):
     "Float each member crate's Cargo.lock to latest matching versions, in parallel; prints what moved."
     crates = [d for d in _ws_dirs(root) if (d/"Cargo.toml").exists()]
@@ -443,6 +505,7 @@ def ws_sync(
         return
     up = upgrade or _should_upgrade(root)
     if up: _cargo_update(root, workers=workers)
+    _sync_cargo_keys(root)
     subprocess.run(["uv", "sync", "-U"] if up else ["uv", "sync"], check=True, cwd=root)
     if up: _upgrade_stamp(root).touch()
 

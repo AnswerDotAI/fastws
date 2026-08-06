@@ -89,6 +89,8 @@ sees it), the sync also floats dependencies: `uv sync -U` instead of plain `uv s
 a parallel `cargo update` in every member with a `Cargo.toml`, printing what moved. Pass
 `--upgrade` to force that pass regardless of when it last ran.
 
+Before every uv sync, `ws-sync` writes `.git/fastws-cargo-key` for each member crate. The key hashes `Cargo.lock` contents and the workspace Cargo patch configuration. For Git dependencies redirected to local paths by `[patch."<url>"]`, it also hashes each patched crate's `Cargo.toml`, `build.rs`, and `src` tree, recursively. The file is rewritten only when that content changes, so projects can use `{ file = ".git/fastws-cargo-key" }` in `tool.uv.cache-keys` without rebuilding after a timestamp-only `Cargo.lock` write.
+
 ```bash
 ws-sync
 ws-sync --workspace ~/aai-ws

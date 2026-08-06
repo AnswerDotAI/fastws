@@ -634,3 +634,51 @@ def test_ws_sync_upgrades_at_most_daily(tmp_path, monkeypatch):
     calls.clear()
     core.ws_sync(workspace=str(tmp_path), upgrade=True)    # force flag overrides a fresh stamp
     assert ["uv", "sync", "-U"] in calls and ["cargo", "update"] in calls
+
+
+def test_cargo_keys_hash_contents_and_patched_git_deps(tmp_path):
+    import os
+    crate, dep = tmp_path/"crate", tmp_path/"dep"
+    for d in crate,dep: (d/"src").mkdir(parents=True)
+    (crate/".git").mkdir()
+    (tmp_path/".cargo").mkdir()
+    (tmp_path/"pyproject.toml").write_text(r'''[tool.uv.workspace]
+members = ["*"]
+''')
+    (tmp_path/".cargo"/"config.toml").write_text(fr'''[patch."https://example.com/dep"]
+dep = {{ path = "{dep}" }}
+''')
+    (crate/"Cargo.toml").write_text(r'''[package]
+name = "crate"
+version = "0.1.0"
+
+[dependencies]
+dep = { git = "https://example.com/dep" }
+''')
+    lock = crate/"Cargo.lock"
+    lock.write_text("first lock\n")
+    (crate/"src"/"lib.rs").write_text("root source\n")
+    (dep/"Cargo.toml").write_text(r'''[package]
+name = "dep"
+version = "0.1.0"
+''')
+    dep_src = dep/"src"/"lib.rs"
+    dep_src.write_text("dependency source\n")
+
+    core._sync_cargo_keys(tmp_path)
+    key = crate/".git"/"fastws-cargo-key"
+    first, mtime = key.read_text(), key.stat().st_mtime_ns
+
+    lock_mtime = lock.stat().st_mtime_ns
+    os.utime(lock, ns=(lock_mtime + 1_000_000_000, lock_mtime + 1_000_000_000))
+    core._sync_cargo_keys(tmp_path)
+    assert key.read_text() == first and key.stat().st_mtime_ns == mtime
+
+    lock.write_text("second lock\n")
+    core._sync_cargo_keys(tmp_path)
+    second = key.read_text()
+    assert second != first
+
+    dep_src.write_text("changed dependency source\n")
+    core._sync_cargo_keys(tmp_path)
+    assert key.read_text() != second
