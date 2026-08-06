@@ -7,10 +7,10 @@ from pathlib import Path
 
 from fastcore.script import call_parse
 from fastcore.parallel import parallel_async
-from ghapi.core import APIError, GhApi
+from ghapi.core import APIError, GhApi, dep_closure, local_dep_graph
 from packaging.version import InvalidVersion, Version
 
-from .core import _dep_key, _load_repos, _resolve_path, _ws_root
+from .core import _load_repos, _resolve_path, _ws_root
 
 try: import tomllib
 except ModuleNotFoundError: import tomli as tomllib
@@ -65,25 +65,6 @@ class ReleaseReport(list):
         if clean: out.append(f"up to date: {' '.join(clean)}")
         return "\n".join(out) or "nothing to check"
 
-def _member_graph(root: Path) -> dict:
-    "{package name: (repo dir name, [dep package names])} for every workspace member with a pyproject.toml."
-    res = {}
-    for p in sorted(root.glob("*/pyproject.toml")):
-        data = tomllib.loads(p.read_text(encoding="utf-8"))
-        proj = data.get("project", {})
-        if not (name := proj.get("name")): continue
-        res[name.casefold()] = (p.parent.name, [_dep_key(d) for d in proj.get("dependencies", [])])
-    return res
-
-def _closure(name: str, graph: dict) -> set[str]:
-    "Repo dir names for `name` and its transitive workspace-local dependencies."
-    seen, todo = set(), [name.casefold()]
-    while todo:
-        if (n := todo.pop()) in seen or n not in graph: continue
-        seen.add(n)
-        todo += graph[n][1]
-    return {graph[n][0] for n in seen}
-
 async def check_releases(project: str = None, skip=None, workspace: str = "", repos_file: str = "repos.txt") -> ReleaseReport:
     "Sweep every workspace repo (or `project`'s transitive dependency closure) for unreleased commits; `[tool.fastws].release_exclude` names repos to leave out (apps that deploy rather than release)."
     root = _ws_root(workspace)
@@ -91,7 +72,7 @@ async def check_releases(project: str = None, skip=None, workspace: str = "", re
     excl = {e.casefold() for e in _fastws_cfg(root).get("release_exclude", [])}
     repos = [r for r in repos if r.split("/")[-1].casefold() not in excl]
     if project:
-        dirs = _closure(project, _member_graph(root))
+        dirs = dep_closure(project, local_dep_graph(root))
         repos = [r for r in repos if r.split("/")[-1] in dirs]
     pats = _skip_pats(skip, root)
     res = await parallel_async(check_release, repos, skip=pats, return_exceptions=True)

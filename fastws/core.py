@@ -8,6 +8,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 
 from fastcore.script import call_parse
 from fastgit import Git
+from ghapi.core import dep_key
 
 try: import tomllib
 except ModuleNotFoundError: import tomli as tomllib
@@ -42,11 +43,6 @@ def _resolve_path(root: Path, path: str) -> Path:
 def _repo_key(repo: str) -> str: return repo.strip().rstrip("/").removesuffix(".git").casefold()
 
 def _pkg_key(name: str) -> str: return name.casefold()
-
-def _dep_key(dep: str) -> str:
-    dep = dep.split(";", 1)[0].strip()
-    dep = re.split(r"[\s<>=!~]", dep, maxsplit=1)[0]
-    return dep.split("[", 1)[0].casefold()
 
 def _fmt_toml_val(v) -> str:
     if isinstance(v, bool): return "true" if v else "false"
@@ -136,10 +132,10 @@ def _remove_from_pyproject(pyproject_path: Path, names: list[str]) -> list[str]:
     sources = dict(data.get("tool", {}).get("uv", {}).get("sources", {}))
     deps = list(data.get("project", {}).get("dependencies", []))
     targets = {_pkg_key(n) for n in names}
-    removed = sorted({_pkg_key(s) for s in sources if _pkg_key(s) in targets} | {_dep_key(d) for d in deps if _dep_key(d) in targets})
+    removed = sorted({_pkg_key(s) for s in sources if _pkg_key(s) in targets} | {dep_key(d) for d in deps if dep_key(d) in targets})
     if not removed: return []
     sources = {k:v for k,v in sources.items() if _pkg_key(k) not in targets}
-    deps = [d for d in deps if _dep_key(d) not in targets]
+    deps = [d for d in deps if dep_key(d) not in targets]
     content = _replace_table(content, "tool.uv.sources", "\n".join(f"{k} = {_fmt_source(v)}" for k,v in sources.items()))
     content = _replace_project_dependencies(content, deps)
     pyproject_path.write_text(content)
@@ -267,7 +263,7 @@ def _sync_ws_pyproject(pyproject_path: Path, template_path: Path, projects: list
     for proj in missing: sources[proj] = {"workspace": True}
     for n,p in ext_missing: sources[n] = {"path": p, "editable": True}
     deps = list(data.get("project", {}).get("dependencies", []))
-    dep_keys = {_dep_key(dep) for dep in deps}
+    dep_keys = {dep_key(dep) for dep in deps}
     for proj in missing + [n for n,_ in ext_missing]:
         if _pkg_key(proj) in dep_keys: continue
         deps.append(proj)

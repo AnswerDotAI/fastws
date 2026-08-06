@@ -27,17 +27,6 @@ def test_skip_pats_defaults_and_config(tmp_path):
     for m in ("deps", "CI fixups", "document the API", "cleanup tests"): assert not hits(m)  # deps IS release-worthy; anchored bare words only
 
 
-def test_member_graph_and_closure(tmp_path):
-    (tmp_path/"app").mkdir(); (tmp_path/"libx").mkdir(); (tmp_path/"liby").mkdir(); (tmp_path/"other").mkdir()
-    (tmp_path/"app/pyproject.toml").write_text('[project]\nname = "app"\ndependencies = ["libx>=1.0"]\n', encoding="utf-8")
-    (tmp_path/"libx/pyproject.toml").write_text('[project]\nname = "libx"\ndependencies = ["liby[full]", "requests"]\n', encoding="utf-8")
-    (tmp_path/"liby/pyproject.toml").write_text('[project]\nname = "liby"\n', encoding="utf-8")
-    (tmp_path/"other/pyproject.toml").write_text('[project]\nname = "other"\n', encoding="utf-8")
-
-    graph = relmod._member_graph(tmp_path)
-    assert relmod._closure("app", graph) == {"app", "libx", "liby"}  # transitive, extras stripped, non-members dropped
-
-
 def test_release_report_repr():
     rep = relmod.ReleaseReport([("mdhtml", ["fixes #30"]), ("solveit", None), ("fastcore", []), ("bad", ValueError("boom"))])
     txt = repr(rep)
