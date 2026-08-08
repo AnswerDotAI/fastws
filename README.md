@@ -68,6 +68,18 @@ ws-branches
 ws-branches --expected develop
 ```
 
+### `ws-build`
+
+Build an sdist of each workspace project (including `repos.txt` checkouts outside the root) into a dists directory, `.dists` by default. A project is rebuilt only when a file in it is newer than its existing sdist, and older versions of a rebuilt package are pruned, so the directory always holds one current sdist per project. A failing project gets a warning without stopping the others, but the command then exits 1.
+
+Progress goes to stderr; on success the dists path prints to stdout, so `$(ws-build)` in a script both refreshes the pool and yields its location. The result suits any resolver that takes a candidate pool, e.g. `uv pip install --find-links` or a docker build context for images that must test unreleased workspace packages:
+
+```bash
+ws-build
+ws-build --force  # rebuild everything
+ws-build --out /tmp/dists
+```
+
 ### `ws-sync`
 
 Sync the workspace metadata, pull local repos, and install updates.

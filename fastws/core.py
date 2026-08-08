@@ -1,8 +1,8 @@
 "Fast workspace tools for multi-repo management."
 
-__all__ = ["ws_clone", "ws_pull", "ws_status", "ws_branches", "ws_sync", "ws_add", "ws_remove"]
+__all__ = ["ws_clone", "ws_pull", "ws_status", "ws_branches", "ws_build", "ws_sync", "ws_add", "ws_remove"]
 
-import ast, fnmatch, hashlib, json, os, re, shutil, subprocess, time
+import ast, fnmatch, hashlib, json, os, re, shutil, subprocess, sys, time
 from pathlib import Path
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
@@ -382,6 +382,71 @@ def ws_branches(
         branch = g.branch(show_current=True).strip()
         print(f"✓ {d}: OK (on {expected})" if branch == expected else f"⚠️  {d}: WARNING (on {branch})")
 
+_BUILD_SKIP_DIRS = {".git", "__pycache__", ".venv", "node_modules", "dist", "build", "target", ".ipynb_checkpoints", ".pytest_cache", ".mypy_cache"}
+
+def _src_mtime(d: Path) -> float:
+    "Newest file mtime under `d`, ignoring VCS internals and build outputs"
+    newest = 0.0
+    for dirpath, dirnames, filenames in os.walk(d):
+        dirnames[:] = [o for o in dirnames if o not in _BUILD_SKIP_DIRS and not o.endswith(".egg-info")]
+        for f in filenames:
+            try: newest = max(newest, os.stat(os.path.join(dirpath, f)).st_mtime)
+            except OSError: pass
+    return newest
+
+def _dist_name(name: str) -> str: return re.sub(r"[-_.]+", "_", name).casefold()
+
+def _sdists_by_pkg(out: Path) -> dict[str, list[Path]]:
+    "Existing sdists in `out`, grouped by normalized package name"
+    res = {}
+    for p in out.glob("*.tar.gz"): res.setdefault(_dist_name(p.name.removesuffix(".tar.gz").rsplit("-", 1)[0]), []).append(p)
+    return res
+
+def _build_projects(root: Path, repos_file: str) -> list[tuple[str, Path]]:
+    "(name, dir) for every project ws-sync installs: workspace members plus external checkouts"
+    repos_path = _resolve_path(root, repos_file)
+    entries = _load_repo_entries(repos_path, root) if repos_path.exists() else []
+    ext_dirs = [d for _,d in entries if d.resolve().parent != root.resolve()]
+    res = [(name, d) for d in _ws_dirs(root) if (d/"pyproject.toml").exists() and (name := _read_pyproject_name(d/"pyproject.toml"))]
+    return res + [(n, _resolve_path(root, p)) for n,p in _external_projects(root, ext_dirs)]
+
+@call_parse
+def ws_build(
+    workspace: str = "",  # Workspace root; defaults to active venv parent when available
+    out: str = ".dists",  # Output directory for sdists, relative to the workspace root
+    repos_file: str = "repos.txt",  # Repo list, for checkouts outside the workspace root
+    force: bool = False,  # Rebuild every project, ignoring existing sdists
+    workers: int = 16,  # Number of parallel workers
+):
+    "Build an sdist of each workspace project into `out`, skipping projects unchanged since their last build; superseded versions are pruned. Progress goes to stderr; on success the dists path prints to stdout; exits 1 if any build fails."
+    root = _ws_root(workspace, repos_file)
+    out_path = _resolve_path(root, out)
+    out_path.mkdir(parents=True, exist_ok=True)
+    projs = _build_projects(root, repos_file)
+    existing = _sdists_by_pkg(out_path)
+    def _stale(name, d):
+        cur = existing.get(_dist_name(name))
+        return not cur or _src_mtime(d) > max(p.stat().st_mtime for p in cur)
+    todo = [(n,d) for n,d in projs if force or _stale(n,d)]
+
+    def bld(nd):
+        n,d = nd
+        res = subprocess.run(["uv", "build", "--sdist", str(d), "-o", str(out_path)], capture_output=True, text=True)
+        return n, res.returncode, (res.stdout or "") + (res.stderr or "")
+
+    built = failed = 0
+    with ThreadPoolExecutor(max_workers=workers) as ex:
+        for name, code, out_txt in ex.map(bld, todo):
+            if code:
+                failed += 1
+                print(f"⚠️  {name}: build failed\n{out_txt}", file=sys.stderr)
+                continue
+            built += 1
+            for p in sorted(_sdists_by_pkg(out_path).get(_dist_name(name), []), key=lambda p: p.stat().st_mtime)[:-1]: p.unlink()
+            print(f"✓ {name}", file=sys.stderr)
+    print(f"{built} built, {len(projs)-len(todo)} up to date" + (f", {failed} failed" if failed else ""), file=sys.stderr)
+    if failed: raise SystemExit(1)
+    print(out_path)
 def _upgrade_stamp(root: Path) -> Path:
     "Stamp whose mtime records the last dependency upgrade; kept inside .git (never tracked) when the root is a git repo."
     gitdir = root/".git"
