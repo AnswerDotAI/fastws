@@ -1,5 +1,17 @@
 <!-- do not remove -->
 
+## 0.0.9
+
+### New Features
+
+- Add ws-build: build sdists of all workspace projects into a dists dir, skipping unchanged projects and pruning old versions ([#23](https://github.com/AnswerDotAI/fastws/issues/23))
+- detect project from cwd, add --nodeps to skip the dependency closure, and map dir names to packages ([#22](https://github.com/AnswerDotAI/fastws/issues/22))
+- Move `dep_key`, member graph, and closure helpers to ghapi (>=2.0.6) and use `dep_key`/`local_dep_graph`/`dep_closure` in core and releases ([#21](https://github.com/AnswerDotAI/fastws/issues/21))
+- ws-sync: write content-hashed .git/fastws-cargo-key per crate, covering Cargo.lock and locally patched git deps, for uv cache-keys ([#20](https://github.com/AnswerDotAI/fastws/issues/20))
+- Run cargo update before uv sync in `ws_sync` so Rust deps refresh first ([#19](https://github.com/AnswerDotAI/fastws/issues/19))
+- Add out-of-tree repo support, auto-managed workspace excludes, and uv.sources preservation to ws-sync ([#18](https://github.com/AnswerDotAI/fastws/issues/18))
+
+
 ## 0.0.8
 
 ### New Features
