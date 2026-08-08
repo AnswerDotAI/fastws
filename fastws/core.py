@@ -531,7 +531,7 @@ def _cargo_update(root: Path, workers: int = 16):
     with ThreadPoolExecutor(max_workers=workers) as ex:
         for name, code, out in ex.map(upd, crates):
             if code: print(f"⚠️  {name}: cargo update failed\n{out}")
-            elif lines := [l for l in out.splitlines() if l.lstrip().startswith(("Updating ", "Adding ", "Removing "))]:
+            elif lines := [l for l in out.splitlines() if l.lstrip().startswith(("Updating ", "Adding ", "Removing ")) and "crates.io index" not in l]:
                 print(f"{name}:\n" + "\n".join(lines))
 
 @call_parse
