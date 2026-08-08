@@ -339,7 +339,7 @@ def ws_clone(
 @call_parse
 def ws_pull(
     repos_file: str = "repos.txt",  # File containing repo list
-    workers: int = 16,  # Number of parallel workers
+    workers: int = 64,  # Number of parallel workers
 ):
     "Pull updates for all repos."
     _pull([d for _,d in _load_repo_entries(repos_file, Path("."))], workers)
@@ -540,7 +540,7 @@ def ws_sync(
     repos_file: str = "repos.txt",  # Repo list to update from local git remotes
     pyproject_file: str = "pyproject.toml",  # Workspace pyproject to update
     template_file: str = "pyproject.tmpl",  # Template copied when pyproject.toml is missing
-    workers: int = 16,  # Number of parallel workers
+    workers: int = 64,  # Number of parallel workers
     upgrade: bool = False,  # Force the once-daily dependency upgrade pass
 ):
     "Sync workspace metadata and run uv sync; at most once per day (or with `upgrade`), float dependencies with uv sync -U plus cargo update in member crates."
