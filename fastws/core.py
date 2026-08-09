@@ -4,8 +4,9 @@ __all__ = ["ws_clone", "ws_pull", "ws_status", "ws_branches", "ws_build", "ws_sy
 
 import ast, fnmatch, hashlib, json, os, re, shutil, subprocess, sys, time
 from pathlib import Path
-from concurrent.futures import ThreadPoolExecutor, as_completed
+from concurrent.futures import ThreadPoolExecutor
 
+from fastcore.parallel import parallel_async_gen
 from fastcore.script import call_parse
 from fastgit import Git
 from ghapi.core import dep_key
@@ -94,13 +95,14 @@ def _ws_dirs(root: Path) -> list[Path]:
     members, exclude = _ws_cfg(root)
     return [d for d in sorted(root.iterdir()) if _is_ws_dir(d, members, exclude)]
 
-def _discover_ws_repos(root: Path) -> list[str]:
-    repos = []
-    for d in (o for o in _ws_dirs(root) if (o/'.git').exists()):
-        try: res = subprocess.run(["git", "-C", str(d), "remote", "get-url", "origin"], check=True, capture_output=True, text=True)
-        except subprocess.CalledProcessError: continue
-        if repo := _parse_github_repo(res.stdout): repos.append(repo)
-    return repos
+async def _discover_ws_repos(root: Path) -> list[str]:
+    dirs = [d for d in _ws_dirs(root) if (d/".git").exists()]
+    async def origin(d):
+        url = await Git(d, sync=False).remote("get-url", "origin", mute_errors=True)
+        return _parse_github_repo(url) if url else None
+    res = [None]*len(dirs)
+    async for i, r in parallel_async_gen(origin, dirs, n_workers=32): res[i] = r
+    return [r for r in res if r]
 
 def _update_repos_file(repos_path: Path, repos: list[str]) -> list[str]:
     existing = _load_repos(repos_path) if repos_path.exists() else []
@@ -307,42 +309,69 @@ def _write_pyright_config(root: Path):
     cfg_path.write_text(json.dumps(cfg, indent=2) + '\n')
     for pth in site.glob('_pyright_editable_*.pth'): pth.unlink()
 
-def _clone_one(repo: str, d: Path) -> str:
+async def _clone_one(repo: str, d: Path) -> str|None:
     if d.exists(): return
     try:
-        subprocess.run(["git", "clone", f"git@github.com:{repo}.git", str(d)], check=True, capture_output=True)
+        await Git(d.parent, sync=False, raise_exc=True).clone(f"git@github.com:{repo}.git", str(d))
         return f"✓ {d.name}: cloned"
-    except subprocess.CalledProcessError as e: return f"✗ {d.name}: {e.stderr.decode().strip()}"
+    except subprocess.CalledProcessError as e: return f"✗ {d.name}: {e.stderr.strip()}"
 
-def _pull_one(d: Path) -> str:
+async def _pull_one(d: Path) -> str:
     if not d.exists(): return f"✗ {d.name}: directory not found"
     try:
-        res = subprocess.run(["git", "-C", str(d), "pull", "-q", "--stat"], check=True, capture_output=True, text=True)
-        return f"✓ {d.name}" + (f"\n{res.stdout.strip()}" if res.stdout.strip() else "")
+        out = await Git(d, sync=False, raise_exc=True).pull("-q", "--stat")
+        return f"✓ {d.name}" + (f"\n{out}" if out else "")
     except subprocess.CalledProcessError as e: return f"✗ {d}: {e.stderr.strip()}"
 
-def _pull(dirs: list[Path], workers: int = 16):
-    with ThreadPoolExecutor(max_workers=workers) as ex:
-        for result in as_completed([ex.submit(_pull_one, d) for d in dirs]): print(result.result())
+async def _pull(dirs: list[Path], workers: int = 64):
+    async for _, res in parallel_async_gen(_pull_one, dirs, n_workers=workers): print(res)
+
+async def _remote_heads(refs) -> list[str|None]:
+    "Head oid on GitHub for each (owner/name, branch)"
+    from ghapi.graphql import GhGql
+    gql = GhGql()
+    return await gql.batch(gql.repo(s).ref(qualifiedName=f"refs/heads/{b}").target.oid for s, b in refs)
+
+async def _changed_dirs(dirs: list[Path]) -> list[Path]:
+    "Dirs whose GitHub origin has moved past the local tracking ref, plus any that can't be checked"
+    async def info(d):
+        try:
+            g = Git(d, sync=False, raise_exc=True)
+            spec = _parse_github_repo(await g.remote("get-url", "origin"))
+            branch = await g.current_branch
+            if not spec or not branch: return None
+            local = await g.rev_parse(f"origin/{branch}", mute_errors=True, raise_exc=False)
+            return (spec, branch, str(local)) if local else None
+        except Exception: return None
+    infos = [None]*len(dirs)
+    async for i, r in parallel_async_gen(info, dirs, n_workers=32): infos[i] = r
+    known = [(d, i) for d, i in zip(dirs, infos) if i]
+    unknown = [d for d, i in zip(dirs, infos) if not i]
+    if not known: return dirs
+    heads = await _remote_heads([(s, b) for _, (s, b, _) in known])
+    return [d for ((d, (_, _, local)), remote) in zip(known, heads) if remote != local] + unknown
 
 @call_parse
-def ws_clone(
+async def ws_clone(
     repos_file: str = "repos.txt",  # File containing repo list (one per line: owner/repo, plus an optional checkout location)
     workers: int = 16,  # Number of parallel workers
 ):
     "Clone all repos from a repos file."
     entries = _load_repo_entries(repos_file, Path("."))
-    with ThreadPoolExecutor(max_workers=workers) as ex:
-        for result in as_completed([ex.submit(_clone_one, r, d) for r,d in entries]):
-            if result.result(): print(result.result())
+    async def clone(e): return await _clone_one(*e)
+    async for _, res in parallel_async_gen(clone, entries, n_workers=workers):
+        if res: print(res)
 
 @call_parse
-def ws_pull(
+async def ws_pull(
     repos_file: str = "repos.txt",  # File containing repo list
     workers: int = 64,  # Number of parallel workers
 ):
-    "Pull updates for all repos."
-    _pull([d for _,d in _load_repo_entries(repos_file, Path("."))], workers)
+    "Pull updates for repos whose GitHub origin has moved (all repos when that can't be checked)."
+    dirs = [d for _,d in _load_repo_entries(repos_file, Path("."))]
+    try: dirs = await _changed_dirs(dirs)
+    except Exception: pass
+    await _pull(dirs, workers)
 
 @call_parse
 def ws_status(
@@ -535,7 +564,7 @@ def _cargo_update(root: Path, workers: int = 16):
                 print(f"{name}:\n" + "\n".join(lines))
 
 @call_parse
-def ws_sync(
+async def ws_sync(
     workspace: str = "",  # Workspace root; defaults to active venv parent when available
     repos_file: str = "repos.txt",  # Repo list to update from local git remotes
     pyproject_file: str = "pyproject.toml",  # Workspace pyproject to update
@@ -548,12 +577,15 @@ def ws_sync(
     repos_path = _resolve_path(root, repos_file)
     pyproject_path = _resolve_path(root, pyproject_file)
     template_path = _resolve_path(root, template_file)
-    repos = _discover_ws_repos(root)
+    repos = await _discover_ws_repos(root)
 
     if missing_repos := _update_repos_file(repos_path, repos): print(f"Added repos: {', '.join(missing_repos)}")
     entries = _load_repo_entries(repos_path, root) if repos_path.exists() else []
     ext_dirs = [d for _,d in entries if d.resolve().parent != root.resolve()]
-    _pull([root/_repo_dir(r) for r in repos] + [d for d in ext_dirs if (d/".git").exists()], workers=workers)
+    dirs = [root/_repo_dir(r) for r in repos] + [d for d in ext_dirs if (d/".git").exists()]
+    try: dirs = await _changed_dirs(dirs)
+    except Exception: pass
+    await _pull(dirs, workers=workers)
 
     added_ex, removed_ex = _sync_ws_excludes(pyproject_path, root, {d.name for _,d in entries if d.resolve().parent == root.resolve()})
     if added_ex: print(f"Auto-excluded from the workspace: {', '.join(added_ex)}")
@@ -571,7 +603,7 @@ def ws_sync(
     if up: _upgrade_stamp(root).touch()
 
 @call_parse
-def ws_add(
+async def ws_add(
     repo: str,  # Repo to add (owner/repo to clone), or an existing local folder (a path outside the workspace stays where it is)
     workspace: str = "",  # Workspace root; defaults to active venv parent when available
     repos_file: str = "repos.txt",  # Repo list to update
@@ -585,8 +617,8 @@ def ws_add(
     added = _update_repos_file(repos_path, [f"{repo} {location}" if location else repo])
     if added: print(f"Added repo: {repo}")
     else: print(f"Repo already present: {repo}")
-    if not local: print(_clone_one(repo, root/_repo_dir(repo)))
-    ws_sync(str(root), repos_file, pyproject_file, template_file)
+    if not local: print(await _clone_one(repo, root/_repo_dir(repo)))
+    await ws_sync(str(root), repos_file, pyproject_file, template_file)
 
 def _is_repo_spec(repo: str) -> bool:
     repo = repo.strip().rstrip("/").removesuffix(".git")
@@ -595,8 +627,8 @@ def _is_repo_spec(repo: str) -> bool:
 def _origin_repo(d: Path) -> str:
     "Canonical owner/repo from `d`'s GitHub origin remote"
     if not (d/".git").exists(): raise SystemExit(f"{d.name} is not a git repository: `git init` it and create a remote, e.g. `gh repo create <owner>/{d.name} --source={d} --push`")
-    res = subprocess.run(["git", "-C", str(d), "remote", "get-url", "origin"], capture_output=True, text=True)
-    if res.returncode != 0 or not (parsed := _parse_github_repo(res.stdout)):
+    url = Git(d).remote("get-url", "origin", mute_errors=True)
+    if not url or not (parsed := _parse_github_repo(url)):
         raise SystemExit(f"{d.name} has no GitHub 'origin' remote: create one, e.g. `gh repo create <owner>/{d.name} --source={d} --push`")
     return parsed
 
@@ -626,8 +658,8 @@ def _resolve_removal_target(root: Path, repo: str, repos_path: Path) -> str:
     for r in (_load_repos(repos_path) if repos_path.exists() else []):
         if _repo_dir(r).casefold() == repo.casefold(): return r
     if (root/repo/".git").exists():
-        res = subprocess.run(["git", "-C", str(root/repo), "remote", "get-url", "origin"], capture_output=True, text=True)
-        if res.returncode == 0 and (parsed := _parse_github_repo(res.stdout)): return parsed
+        url = Git(root/repo).remote("get-url", "origin", mute_errors=True)
+        if url and (parsed := _parse_github_repo(url)): return parsed
     return repo
 
 def _resolve_repo_dir(root: Path, repo: str) -> Path:
@@ -637,16 +669,13 @@ def _resolve_repo_dir(root: Path, repo: str) -> Path:
     if (rd := d.resolve()) == root or rd.parent != root: raise SystemExit(f"Refusing to remove {d}: not directly inside {root}")
     return d
 
-def _git_out(d: Path, *args: str) -> str:
-    return subprocess.run(["git", "-C", str(d), *args], check=True, capture_output=True, text=True).stdout
-
 def _repo_safety_issues(d: Path) -> list[str]:
     if not (d/".git").exists(): return [f"{d.name} is not a git repository"]
+    g = Git(d, raise_exc=True)
     issues = []
-    if subprocess.run(["git", "-C", str(d), "remote", "get-url", "origin"], capture_output=True, text=True).returncode != 0:
-        issues.append(f"{d.name} has no 'origin' remote")
-    if _git_out(d, "status", "--porcelain").strip(): issues.append(f"{d.name} has uncommitted changes")
-    if _git_out(d, "log", "--branches", "--not", "--remotes", "--format=%h").strip(): issues.append(f"{d.name} has unpushed commits")
+    if g.remote("get-url", "origin", mute_errors=True, raise_exc=False) is None: issues.append(f"{d.name} has no 'origin' remote")
+    if g.status("--porcelain"): issues.append(f"{d.name} has uncommitted changes")
+    if g.log("--branches", "--not", "--remotes", format="%h"): issues.append(f"{d.name} has unpushed commits")
     return issues
 
 @call_parse

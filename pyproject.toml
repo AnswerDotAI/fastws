@@ -16,8 +16,8 @@ classifiers = [
 ]
 
 dependencies = [
-  "fastcore>=1.14.3",
-  "fastgit>=0.0.7",
+  "fastcore>=2.2.6",
+  "fastgit>=0.1.2",
   "ghapi>=2.0.6",
   "packaging",
   "tomli; python_version < '3.11'",
@@ -28,6 +28,8 @@ dev = [
   "fastship",
   "build",
   "twine",
+  "pytest",
+  "pytest-asyncio",
 ]
 
 [project.scripts]
@@ -43,6 +45,9 @@ ws-releases = "fastws.releases:ws_releases"
 
 [project.urls]
 Homepage = "https://github.com/AnswerDotAI/fastws"
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
 
 [tool.setuptools.dynamic]
 version = { attr = "fastws.__version__" }

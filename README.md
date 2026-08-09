@@ -44,7 +44,7 @@ ws-clone --workers 8
 
 ### `ws-pull`
 
-Pull updates for all repos (parallel):
+Pull updates in parallel, first asking GitHub (one batched GraphQL call) which repos' origins have actually moved, so unchanged repos are skipped silently. Repos that can't be checked (no `GITHUB_TOKEN`, detached HEAD, non-GitHub remote) are pulled the old way:
 
 ```bash
 ws-pull
@@ -82,7 +82,7 @@ ws-build --out /tmp/dists
 
 ### `ws-sync`
 
-Sync the workspace metadata, pull local repos, and install updates.
+Sync the workspace metadata, pull local repos, and install updates. Like `ws-pull`, only repos whose GitHub origin has moved are pulled, so a typical sync is quiet and fast.
 By default it uses the active venv parent as the workspace root, so you do not need to `cd` first.
 It respects `tool.uv.workspace.members` and `exclude` when scanning local projects, and if any
 member directory isn't a Python project yet (no `pyproject.toml`, e.g. a fresh empty clone), it
