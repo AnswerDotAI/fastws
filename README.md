@@ -50,6 +50,8 @@ Pull updates for all repos (parallel):
 ws-pull
 ```
 
+Repos checked out on a branch other than `main` are labeled in the pull output.
+
 ### `ws-status`
 
 Show uncommitted changes and unpushed commits:
