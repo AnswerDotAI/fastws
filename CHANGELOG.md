@@ -1,5 +1,12 @@
 <!-- do not remove -->
 
+## 0.0.11
+
+### New Features
+
+- fastws: auto-generate Cargo  entries in .cargo/config.toml and treat all root git checkouts as crates, not just uv members ([#26](https://github.com/AnswerDotAI/fastws/issues/26))
+
+
 ## 0.0.10
 
 ### New Features
