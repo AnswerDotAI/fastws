@@ -10,12 +10,29 @@ pip install fastws-cli
 
 ## Setup
 
-Create a `repos.txt` file listing your repos (one per line):
+First, install uv if you haven't already, using the official script:
+
+```bash
+curl -LsSf https://astral.sh/uv/install.sh | sh
+source $HOME/.local/bin/env
+```
+
+If you've already installed uv, you might want to ensure it's up to date:
+
+```bash
+uv self update
+```
+
+Now you're ready to set up the workspace. First create a `repos.txt` file listing your repos (one per line) inside your desired workspace location. The script uses `~/aai-ws`.
 
 ```
-AnswerDotAI/fastcore
+AnswerDotAI/dialoghelper
+AnswerDotAI/exhash
 AnswerDotAI/fastgit
 AnswerDotAI/fastship
+AnswerDotAI/pyskills
+AnswerDotAI/safepyrun
+AnswerDotAI/shell_sage
 AnswerDotAI/fastws
 ```
 
@@ -28,6 +45,22 @@ repo can hold several small packages alongside non-Python content:
 ```
 AnswerDotAI/fastcore
 jph00/private ~/private
+```
+
+Then create and activate the uv environment (the examples use `~/aai-ws` as the workspace root; any directory works):
+
+```bash
+cd ~/aai-ws
+uv venv --python 3.13 && source .venv/bin/activate
+uv pip install fastws-cli
+ws-clone
+ws-sync
+```
+
+You will probably want to have the env auto-activated in all your shells, so run (modifying the location and shell rc file name as needed):
+
+```bash
+echo source ~/aai-ws/.venv/bin/activate >> ~/.bashrc
 ```
 
 ## Commands
@@ -84,6 +117,7 @@ ws-build --out /tmp/dists
 
 Sync the workspace metadata, pull local repos, and install updates. Like `ws-pull`, only repos whose GitHub origin has moved are pulled, so a typical sync is quiet and fast.
 By default it uses the active venv parent as the workspace root, so you do not need to `cd` first.
+If the workspace has no `pyproject.toml` yet, it copies `pyproject.tmpl` when present, else generates a minimal one, so a fresh directory syncs without setup.
 Any git checkout at the root that isn't in `repos.txt` yet is added to it, whether or not it's a Python project; `_`-prefixed directories are private and left alone.
 It respects `tool.uv.workspace.members` and `exclude` when scanning local projects, and if any
 member directory isn't a Python project yet (no `pyproject.toml`, e.g. a fresh empty clone), it

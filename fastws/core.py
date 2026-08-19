@@ -260,10 +260,25 @@ def _replace_project_dependencies(content: str, deps: list[str]) -> str:
     else: section = section.rstrip() + "\n" + dep_block + "\n"
     return content[:start] + section + content[end:]
 
+def _init_ws_pyproject(path: Path, python: str = f"{sys.version_info.major}.{sys.version_info.minor}") -> bool:
+    if path.exists(): return False
+    major,minor = map(int, python.split(".")[:2])
+    name = re.sub(r"[^a-z0-9]+", "-", path.parent.name.casefold()).strip("-") or "workspace"
+    path.write_text(f'''[project]
+name = "{name}"
+version = "0.0.1"
+requires-python = ">={major}.{minor},<{major}.{minor+1}"
+dependencies = []
+
+[tool.uv.workspace]
+members = ["./*"]
+''')
+    return True
+
 def _sync_ws_pyproject(pyproject_path: Path, template_path: Path, projects: list[str], externals: list[tuple[str,str]] = None) -> list[str]:
     if not pyproject_path.exists():
-        if not template_path.exists(): raise SystemExit(f"File not found: {template_path}")
-        shutil.copyfile(template_path, pyproject_path)
+        if template_path.exists(): shutil.copyfile(template_path, pyproject_path)
+        else: _init_ws_pyproject(pyproject_path)
     content = pyproject_path.read_text()
     data = tomllib.loads(content)
     sources = dict(data.get("tool", {}).get("uv", {}).get("sources", {}))
