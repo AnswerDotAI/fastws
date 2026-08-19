@@ -96,24 +96,30 @@ def test_ws_excludes_generates_from_intent_and_auto(tmp_path):
     pyproject = tmp_path/'pyproject.toml'
     pyproject.write_text(
         '[project]\nname = "uvws"\n\n[tool.uv.workspace]\nmembers = ["./*"]\n'
-        'exclude = ["_*", "tmp", "example", "stale"]\n\n[tool.fastws]\nexclude = ["wanted-out"]\n')
-    for name in ('junk', 'fresh-clone', 'realpkg', 'tmpl', 'example', 'stale', 'wanted-out'): (tmp_path/name).mkdir()
+        'exclude = ["_*", "tmp", "example", "stale", "pending"]\n\n[tool.fastws]\nexclude = ["wanted-out"]\n')
+    for name in ('junk', 'fresh-clone', 'realpkg', 'tmpl', 'example', 'stale', 'wanted-out', 'pending', 'rustcrate'): (tmp_path/name).mkdir()
     (tmp_path/'realpkg'/'pyproject.toml').write_text('[project]\nname = "realpkg"\n')
     (tmp_path/'tmpl'/'pyproject.toml').write_text('[project]\nname = "{repo}"\n')
+    (tmp_path/'rustcrate'/'Cargo.toml').write_text('[package]\nname = "rustcrate"\n')
     for name in ('example', 'stale', 'wanted-out'): (tmp_path/name/'pyproject.toml').write_text(f'[project]\nname = "{name}"\n')
 
-    added, removed = core._sync_ws_excludes(pyproject, tmp_path, {'fresh-clone', 'example'})
+    tracked = {'fresh-clone', 'example', 'pending', 'rustcrate'}
+    added, removed = core._sync_ws_excludes(pyproject, tmp_path, tracked)
     data = core.tomllib.loads(pyproject.read_text())
 
-    # kept: glob, missing dir, tracked; auto: junk + placeholder tmpl; intent: wanted-out; dropped: untracked valid project
-    assert set(data['tool']['uv']['workspace']['exclude']) == {'_*', 'tmp', 'example', 'wanted-out', 'junk', 'tmpl'}
-    assert added == ['wanted-out', 'junk', 'tmpl']
-    assert removed == ['stale']
+    # kept: glob, missing dir, tracked non-project; auto: junk, placeholder tmpl, tracked Cargo-only crate; intent: wanted-out; dropped: valid projects, tracked or not
+    assert set(data['tool']['uv']['workspace']['exclude']) == {'_*', 'tmp', 'pending', 'wanted-out', 'junk', 'tmpl', 'rustcrate'}
+    assert set(added) == {'wanted-out', 'junk', 'tmpl', 'rustcrate'}
+    assert set(removed) == {'example', 'stale'}
     assert data['tool']['fastws']['exclude'] == ['wanted-out']  # fastws table untouched
 
     content = pyproject.read_text()
-    assert core._sync_ws_excludes(pyproject, tmp_path, {'fresh-clone', 'example'}) == ([], [])
+    assert core._sync_ws_excludes(pyproject, tmp_path, tracked) == ([], [])
     assert pyproject.read_text() == content
+
+    # a crate that gains a Python layer rejoins the workspace on the next sync
+    (tmp_path/'rustcrate'/'pyproject.toml').write_text('[project]\nname = "rustcrate"\n')
+    assert core._sync_ws_excludes(pyproject, tmp_path, tracked) == ([], ['rustcrate'])
 
 
 def test_external_projects_discovers_root_and_subdir_packages(tmp_path):
@@ -166,6 +172,17 @@ async def test_git_repo_resolution(tmp_path):
     assert core._origin_repo(repo) == 'AnswerDotAI/Proj'
     assert await core._discover_ws_repos(tmp_path) == ['AnswerDotAI/Proj']
     assert core._resolve_add_target(tmp_path, 'proj') == ('AnswerDotAI/Proj', True, None)
+
+    # discovery covers every root git dir, even excluded non-Python ones; `_`-prefixed dirs are private
+    crate = tmp_path/'crate'
+    crate.mkdir()
+    (crate/'Cargo.toml').write_text('[package]\nname = "crate"\n')
+    mk_repo(crate).remote('add', 'origin', 'git@github.com:AnswerDotAI/crate.git')
+    hidden = tmp_path/'_scratch'
+    hidden.mkdir()
+    mk_repo(hidden).remote('add', 'origin', 'git@github.com:AnswerDotAI/scratch.git')
+    (tmp_path/'pyproject.toml').write_text('[tool.uv.workspace]\nmembers = ["./*"]\nexclude = ["crate"]\n')
+    assert sorted(await core._discover_ws_repos(tmp_path)) == ['AnswerDotAI/Proj', 'AnswerDotAI/crate']
 
 
 def test_ws_remove_workflow(tmp_path, monkeypatch, fake_uv):
@@ -220,7 +237,8 @@ def test_cargo_keys_hash_contents_and_patched_git_deps(tmp_path):
     for d in crate, dep: (d/'src').mkdir(parents=True)
     (crate/'.git').mkdir()
     (tmp_path/'.cargo').mkdir()
-    (tmp_path/'pyproject.toml').write_text('[tool.uv.workspace]\nmembers = ["*"]\n')
+    # exclude the crate from the uv workspace: crates are keyed regardless of uv membership
+    (tmp_path/'pyproject.toml').write_text('[tool.uv.workspace]\nmembers = ["*"]\nexclude = ["crate"]\n')
     (tmp_path/'.cargo'/'config.toml').write_text(f'[patch."https://example.com/dep"]\ndep = {{ path = "{dep}" }}\n')
     (crate/'Cargo.toml').write_text('[package]\nname = "crate"\nversion = "0.1.0"\n\n[dependencies]\ndep = { git = "https://example.com/dep" }\n')
     lock = crate/'Cargo.lock'
@@ -272,3 +290,43 @@ async def test_changed_dirs_pulls_only_moved_repos(tmp_path, monkeypatch):
 
     changed = await core._changed_dirs([ahead, current, weird])
     assert set(changed) == {ahead, weird}
+
+
+def test_sync_cargo_patches_generates_and_preserves(tmp_path):
+    (tmp_path/'.cargo').mkdir()
+    config = tmp_path/'.cargo'/'config.toml'
+    config.write_text('[term]\nquiet = true\n\n[patch.crates-io]\n'
+        f'foreign = {{ path = "/elsewhere/foreign" }}\ngone = {{ path = "{tmp_path}/gone" }}\n')
+    crate1 = tmp_path/'crate1'
+    crate1.mkdir()
+    (crate1/'Cargo.toml').write_text('[package]\nname = "crate1"\nversion = "0.1.0"\n\n[dependencies]\nfamily = { git = "https://example.com/family" }\n')
+    family = tmp_path/'family'
+    (family/'sub').mkdir(parents=True)
+    (family/'Cargo.toml').write_text('[package]\nname = "family"\nversion = "0.1.0"\n\n[workspace]\nmembers = ["sub"]\n')
+    (family/'sub'/'Cargo.toml').write_text('[package]\nname = "family-sub"\nversion = "0.1.0"\n')
+    scratch = tmp_path/'_scratch'
+    scratch.mkdir()
+    (scratch/'Cargo.toml').write_text('[package]\nname = "scratch"\n')
+
+    added, removed = core._sync_cargo_patches(tmp_path)
+    data = core.tomllib.loads(config.read_text())
+    cio = data['patch']['crates-io']
+    # every local crate patched, nested cargo workspace members included, `_`-prefixed dirs skipped
+    assert set(cio) == {'foreign', 'crate1', 'family', 'family-sub'}
+    assert cio['foreign']['path'] == '/elsewhere/foreign'  # entries pointing outside the root are kept as-is
+    assert cio['crate1']['path'] == str(crate1)
+    assert cio['family-sub']['path'] == str(family/'sub')
+    assert data['patch']['https://example.com/family']['family']['path'] == str(family)  # git deps on local crates get their URL table
+    assert data['term']['quiet'] is True  # other sections untouched
+    assert set(added) == {'crate1', 'family', 'family-sub'} and removed == ['gone']
+
+    content = config.read_text()
+    assert core._sync_cargo_patches(tmp_path) == ([], [])
+    assert config.read_text() == content
+
+    # a missing config file is created
+    bare = tmp_path/'ws2'
+    (bare/'c').mkdir(parents=True)
+    (bare/'c'/'Cargo.toml').write_text('[package]\nname = "c"\n')
+    core._sync_cargo_patches(bare)
+    assert core.tomllib.loads((bare/'.cargo'/'config.toml').read_text())['patch']['crates-io']['c']['path'] == str(bare/'c')

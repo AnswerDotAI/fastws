@@ -95,8 +95,12 @@ def _ws_dirs(root: Path) -> list[Path]:
     members, exclude = _ws_cfg(root)
     return [d for d in sorted(root.iterdir()) if _is_ws_dir(d, members, exclude)]
 
+def _root_git_dirs(root: Path) -> list[Path]:
+    "Every git checkout directly under `root`, whatever the uv workspace config; `_`-prefixed dirs are private"
+    return [d for d in sorted(root.iterdir()) if d.is_dir() and not d.name.startswith((".", "_")) and (d/".git").exists()]
+
 async def _discover_ws_repos(root: Path) -> list[str]:
-    dirs = [d for d in _ws_dirs(root) if (d/".git").exists()]
+    dirs = _root_git_dirs(root)
     async def origin(d):
         url = await Git(d, sync=False).remote("get-url", "origin", mute_errors=True)
         return _parse_github_repo(url) if url else None
@@ -168,14 +172,19 @@ def _external_projects(root: Path, dirs: list[Path]) -> list[tuple[str,str]]:
 def _valid_project_dir(d: Path) -> bool:
     return (d/"pyproject.toml").exists() and bool(_read_pyproject_name(d/"pyproject.toml"))
 
+def _cargo_only(d: Path) -> bool:
+    "A Rust crate with no Python layer: not a pending scaffold, just not a uv workspace member"
+    return (d/"Cargo.toml").exists() and not (d/"pyproject.toml").exists()
+
 def _sync_ws_excludes(pyproject_path: Path, root: Path, tracked: set[str]) -> tuple[list[str], list[str]]:
     """Regenerate `tool.uv.workspace.exclude` and return (added, removed).
 
-    Kept as-is: `[tool.fastws].exclude` entries (intent), globs, missing dirs, and `tracked` dirs
-    (repos.txt checkouts: excluding those is a decision, and one without a pyproject is a pending
-    member awaiting scaffolding, not junk). Auto-managed: entries for other existing dirs are
-    regenerated each sync, excluding dirs without a valid pyproject and un-excluding dirs that
-    gained one; deliberately excluding an untracked real project takes a `[tool.fastws]` entry."""
+    Kept as-is: `[tool.fastws].exclude` entries (intent), globs, missing dirs, and tracked dirs
+    (repos.txt checkouts) that are still not valid Python projects. Auto-managed: entries for other
+    existing dirs are regenerated each sync, excluding dirs without a valid pyproject (tracked dirs
+    only when they are Cargo-only crates, since a tracked dir with neither file is a pending member
+    awaiting scaffolding) and un-excluding dirs that gained one; deliberately excluding a real
+    project takes a `[tool.fastws]` entry."""
     if not pyproject_path.exists(): return [], []
     content = pyproject_path.read_text()
     data = tomllib.loads(content)
@@ -183,12 +192,12 @@ def _sync_ws_excludes(pyproject_path: Path, root: Path, tracked: set[str]) -> tu
     members = ws.get("members") or ["./*"]
     cur = list(ws.get("exclude") or [])
     intent = [e for e in data.get("tool", {}).get("fastws", {}).get("exclude", []) if isinstance(e, str)]
-    kept = [e for e in cur if e in intent or any(c in e for c in "*?[") or not (root/e).is_dir() or e in tracked]
+    kept = [e for e in cur if e in intent or any(c in e for c in "*?[") or not (root/e).is_dir() or (e in tracked and not _valid_project_dir(root/e))]
     kept += [e for e in intent if e not in kept]
     auto = [d.name for d in sorted(root.iterdir())
             if d.is_dir() and not d.name.startswith(".") and any(_matches_ws(d.name, m) for m in members)
             and not any(_matches_ws(d.name, e) for e in kept)
-            and d.name not in tracked and not _valid_project_dir(d)]
+            and (d.name not in tracked or _cargo_only(d)) and not _valid_project_dir(d)]
     survivors = set(kept) | set(auto)
     new = [e for e in cur if e in survivors] + [e for e in kept + auto if e not in cur]
     if new == cur: return [], []
@@ -488,6 +497,10 @@ def _should_upgrade(root: Path, max_age: float = 86400) -> bool:
 
 _CARGO_KEY = Path(".git/fastws-cargo-key")
 
+def _crate_dirs(root: Path) -> list[Path]:
+    "Root dirs containing a Cargo.toml: the crate view of the workspace, independent of uv membership"
+    return [d for d in sorted(root.iterdir()) if d.is_dir() and not d.name.startswith((".", "_")) and (d/"Cargo.toml").exists()]
+
 def _cargo_patches(root: Path):
     "Local Cargo patches keyed by normalized Git URL and package name, plus their config file."
     config = root/".cargo"/"config.toml"
@@ -500,6 +513,83 @@ def _cargo_patches(root: Path):
             path = Path(path).expanduser()
             patches[(_repo_key(url), name)] = path if path.is_absolute() else (config.parent/path).resolve()
     return patches, config
+
+def _crate_pkgs(d: Path):
+    "(package name, dir) for the crate at `d` and its cargo workspace members"
+    try: data = tomllib.loads((d/"Cargo.toml").read_text())
+    except tomllib.TOMLDecodeError: return
+    if name := data.get("package", {}).get("name"): yield name, d
+    for pat in data.get("workspace", {}).get("members", []):
+        for m in sorted(d.glob(pat)):
+            if not (m/"Cargo.toml").exists(): continue
+            try: sub = tomllib.loads((m/"Cargo.toml").read_text())
+            except tomllib.TOMLDecodeError: continue
+            if name := sub.get("package", {}).get("name"): yield name, m
+
+def _local_crates(root: Path) -> dict[str, Path]:
+    "Package name -> dir for every crate under `root`, nested cargo workspace members included"
+    return {name: d for crate in _crate_dirs(root) for name, d in _crate_pkgs(crate)}
+
+def _git_dep_tables(root: Path, crates: dict[str, Path]) -> dict[str, dict[str, Path]]:
+    "Git URL -> {package: local dir} for members' git deps that name a local crate"
+    res = {}
+    for d in _crate_dirs(root):
+        try: data = tomllib.loads((d/"Cargo.toml").read_text())
+        except tomllib.TOMLDecodeError: continue
+        for deps in _cargo_dep_tables(data):
+            for name, spec in deps.items():
+                if not isinstance(spec, dict) or not (url := spec.get("git")): continue
+                pkg = spec.get("package", name)
+                if path := crates.get(pkg): res.setdefault(url, {})[pkg] = path
+    return res
+
+def _strip_patch_tables(content: str) -> str:
+    "Remove every top-level `[patch.*]` table from TOML `content`"
+    while m := re.search(r"(?m)^\[patch[.\"]", content):
+        nl = content.find("\n", m.start())
+        if nl == -1: return content[:m.start()]
+        nxt = re.search(r"(?m)^\[", content[nl+1:])
+        end = nl+1+nxt.start() if nxt else len(content)
+        content = content[:m.start()] + content[end:]
+    return content
+
+def _sync_cargo_patches(root: Path) -> tuple[list[str], list[str]]:
+    """Regenerate `[patch]` entries in the workspace `.cargo/config.toml` and return (added, removed).
+
+    Every local crate gets a `[patch.crates-io]` entry, and a member's git dep on a local crate gets
+    an entry under that URL, so builds anywhere under `root` use the checkouts: the cargo analog of
+    editable installs. Only entries whose path is inside `root` are managed; entries pointing
+    elsewhere (and any other config sections) are kept as-is, and a kept entry wins over a generated
+    one of the same name."""
+    root = root.resolve()
+    crates = _local_crates(root)
+    desired = {"crates-io": {name: str(d) for name, d in crates.items()}}
+    for url, entries in _git_dep_tables(root, crates).items(): desired[url] = {name: str(d) for name, d in entries.items()}
+    config = root/".cargo"/"config.toml"
+    content = config.read_text() if config.exists() else ""
+    old = tomllib.loads(content).get("patch", {}) if content else {}
+    def inside(spec):
+        if not isinstance(spec, dict) or not (p := spec.get("path")): return False
+        p = Path(p).expanduser()
+        return (p if p.is_absolute() else config.parent/p).resolve().is_relative_to(root)
+    tables = {}
+    for url, entries in old.items():
+        if foreign := {n: s for n, s in entries.items() if not inside(s)}: tables[url] = foreign
+    for url, entries in desired.items():
+        cur = tables.setdefault(url, {})
+        for name, path in entries.items(): cur.setdefault(name, {"path": path})
+    body = "\n".join(
+        (f"[patch.{url}]" if url == "crates-io" else f'[patch."{url}"]') + "\n"
+        + "".join(f"{name} = {_fmt_source(spec)}\n" for name, spec in sorted(entries.items()))
+        for url, entries in tables.items() if entries)
+    new = (_strip_patch_tables(content).rstrip() + "\n\n" + body).lstrip() + "\n" if body else _strip_patch_tables(content)
+    if new == content: return [], []
+    tomllib.loads(new)  # never write an unparseable config
+    config.parent.mkdir(exist_ok=True)
+    config.write_text(new)
+    before = {n for entries in old.values() for n in entries}
+    after = {n for entries in tables.values() for n in entries}
+    return sorted(after - before), sorted(before - after)
 
 def _cargo_dep_tables(data):
     for name in "dependencies","build-dependencies": yield data.get(name, {})
@@ -541,7 +631,7 @@ def _cargo_key(crate: Path, patches, config):
 def _sync_cargo_keys(root: Path):
     "Update content-derived uv keys for workspace crates, without touching unchanged keys."
     patches, config = _cargo_patches(root)
-    for crate in (d for d in _ws_dirs(root) if (d/"Cargo.toml").exists()):
+    for crate in _crate_dirs(root):
         key = crate/_CARGO_KEY
         if not key.parent.is_dir(): continue
         value = _cargo_key(crate, patches, config)
@@ -550,7 +640,7 @@ def _sync_cargo_keys(root: Path):
 
 def _cargo_update(root: Path, workers: int = 16):
     "Float each member crate's Cargo.lock to latest matching versions, in parallel; prints what moved."
-    crates = [d for d in _ws_dirs(root) if (d/"Cargo.toml").exists()]
+    crates = _crate_dirs(root)
     if not crates: return
 
     def upd(d):
@@ -592,6 +682,10 @@ async def ws_sync(
     if removed_ex: print(f"No longer excluded from the workspace: {', '.join(removed_ex)}")
 
     if missing_projects := _sync_ws_pyproject(pyproject_path, template_path, _ws_projects(root), _external_projects(root, ext_dirs)): print(f"Added workspace projects: {', '.join(missing_projects)}")
+
+    added_p, removed_p = _sync_cargo_patches(root)
+    if added_p: print(f"Cargo patches added: {', '.join(added_p)}")
+    if removed_p: print(f"Cargo patches removed: {', '.join(removed_p)}")
 
     if bad := [d.name for d in _ws_dirs(root) if not (d/"pyproject.toml").exists()]:
         print(f"⚠️  Skipping uv sync, not Python projects yet (scaffold with e.g. nbdev-new or ship-new, or remove): {', '.join(bad)}")

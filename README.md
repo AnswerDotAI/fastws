@@ -84,17 +84,28 @@ ws-build --out /tmp/dists
 
 Sync the workspace metadata, pull local repos, and install updates. Like `ws-pull`, only repos whose GitHub origin has moved are pulled, so a typical sync is quiet and fast.
 By default it uses the active venv parent as the workspace root, so you do not need to `cd` first.
+Any git checkout at the root that isn't in `repos.txt` yet is added to it, whether or not it's a Python project; `_`-prefixed directories are private and left alone.
 It respects `tool.uv.workspace.members` and `exclude` when scanning local projects, and if any
 member directory isn't a Python project yet (no `pyproject.toml`, e.g. a fresh empty clone), it
 warns and skips the `uv sync` step instead of letting uv fail on the whole workspace.
 
 The workspace `exclude` list is auto-managed: a top-level directory that isn't a valid Python
-project and isn't a `repos.txt` checkout gets excluded automatically, and is un-excluded once it
-gains a real `pyproject.toml`. Globs, entries for missing directories, and entries for `repos.txt`
-checkouts are always kept, and `exclude = [...]` under `[tool.fastws]` in the workspace
-`pyproject.toml` declares intent the scan can't infer (e.g. keeping a real project out of the
-workspace). Hand-written `[tool.uv.sources]` entries (path, git, ...) are preserved when syncing
+project gets excluded automatically, and is un-excluded once it gains a real `pyproject.toml`.
+A `repos.txt` checkout is auto-excluded only when it's a Cargo-only Rust crate; one with neither
+`pyproject.toml` nor `Cargo.toml` is treated as a pending member awaiting scaffolding and triggers
+the warning above instead. Globs, entries for missing directories, and entries for checkouts that
+are still not valid Python projects are kept, and `exclude = [...]` under `[tool.fastws]` in the
+workspace `pyproject.toml` declares intent the scan can't infer (e.g. keeping a real project out of
+the workspace). Hand-written `[tool.uv.sources]` entries (path, git, ...) are preserved when syncing
 adds new members.
+
+Each sync also regenerates the `[patch]` entries in the workspace's `.cargo/config.toml`: one
+`[patch.crates-io]` entry per local crate (nested cargo workspace members included), plus an entry
+under the matching URL for each member git dep that names a local crate. This is the cargo analog
+of editable installs, so every build under the workspace root uses the local checkouts. Entries
+pointing outside the root, and all other config sections, are left alone. Do not commit a
+`Cargo.lock` generated under these patches: it records source-less local entries that no other
+machine can resolve.
 
 At most once per day (tracked by a stamp file inside the workspace's `.git`, so git never
 sees it), the sync also floats dependencies: `uv sync -U` instead of plain `uv sync`, plus
