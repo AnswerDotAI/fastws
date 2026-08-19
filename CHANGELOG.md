@@ -1,5 +1,12 @@
 <!-- do not remove -->
 
+## 0.0.12
+
+### New Features
+
+- Improve DevX for external users ([#10](https://github.com/AnswerDotAI/fastws/pull/10)), thanks to [@kafkasl](https://github.com/kafkasl)
+
+
 ## 0.0.11
 
 ### New Features
