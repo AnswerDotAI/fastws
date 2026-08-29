@@ -718,6 +718,7 @@ async def ws_add(
     repos_file: str = "repos.txt",  # Repo list to update
     pyproject_file: str = "pyproject.toml",  # Workspace pyproject to update
     template_file: str = "pyproject.tmpl",  # Template copied when pyproject.toml is missing
+    workers: int = 64,  # Number of parallel workers
 ):
     "Add a repo to repos.txt (a local folder resolves via its origin remote) and then run ws-sync."
     root = _ws_root(workspace, repos_file, pyproject_file, template_file)
@@ -727,7 +728,7 @@ async def ws_add(
     if added: print(f"Added repo: {repo}")
     else: print(f"Repo already present: {repo}")
     if not local: print(await _clone_one(repo, root/_repo_dir(repo)))
-    await ws_sync(str(root), repos_file, pyproject_file, template_file)
+    await ws_sync(str(root), repos_file, pyproject_file, template_file, workers=workers)
 
 def _is_repo_spec(repo: str) -> bool:
     repo = repo.strip().rstrip("/").removesuffix(".git")
