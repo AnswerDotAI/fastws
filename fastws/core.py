@@ -639,14 +639,20 @@ def _cargo_input_files(crate: Path):
     src = crate/"src"
     if src.exists(): yield from sorted(path for path in src.rglob("*") if path.is_file())
 
+def _cargo_lock_content(path: Path) -> bytes:
+    "Cargo.lock bytes without Cargo's order-unstable bookkeeping for unused patches"
+    if not path.exists(): return b""
+    return re.sub(r"(?ms)^\[\[patch\.unused\]\]\n.*?(?=^\[\[|\Z)", "", path.read_text()).encode()
+
 def _cargo_key(crate: Path, patches, config):
     h = hashlib.sha256()
-    def add(path, name):
+    def add_content(content, name):
         h.update(name.encode())
         h.update(b"\0")
-        if path.exists(): h.update(path.read_bytes())
+        h.update(content)
         h.update(b"\0")
-    add(crate/"Cargo.lock", "Cargo.lock")
+    def add(path, name): add_content(path.read_bytes() if path.exists() else b"", name)
+    add_content(_cargo_lock_content(crate/"Cargo.lock"), "Cargo.lock")
     if config: add(config, ".cargo/config.toml")
     seen = set()
     def add_dep(dep):
