@@ -267,6 +267,28 @@ def test_cargo_keys_hash_contents_and_patched_git_deps(tmp_path):
     assert key.read_text() != second  # so does a patched dep's source
 
 
+def test_cargo_key_ignores_unused_patch_order(tmp_path):
+    crate = tmp_path/'crate'
+    (crate/'.git').mkdir(parents=True)
+    (crate/'Cargo.toml').write_text('[package]\nname = "crate"\n')
+    lock = crate/'Cargo.lock'
+    head = 'version = 4\n\n[[package]]\nname = "crate"\nversion = "0.1.0"\n\n'
+    a = '[[patch.unused]]\nname = "a"\nversion = "1"\n\n'
+    b = '[[patch.unused]]\nname = "b"\nversion = "1"\n'
+    lock.write_text(head+a+b)
+    core._sync_cargo_keys(tmp_path)
+    key = crate/'.git'/'fastws-cargo-key'
+    first, mtime = key.read_text(), key.stat().st_mtime_ns
+
+    lock.write_text(head+b+'\n'+a)
+    core._sync_cargo_keys(tmp_path)
+    assert key.read_text() == first and key.stat().st_mtime_ns == mtime
+
+    lock.write_text(head.replace('0.1.0', '0.1.1')+a+b)
+    core._sync_cargo_keys(tmp_path)
+    assert key.read_text() != first
+
+
 async def test_changed_dirs_pulls_only_moved_repos(tmp_path, monkeypatch):
     # ahead: a second clone pushes to the shared bare origin, so `ahead`'s origin/main falls behind
     ahead, current, weird = tmp_path/'ahead', tmp_path/'current', tmp_path/'weird'
