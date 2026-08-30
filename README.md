@@ -141,6 +141,10 @@ pointing outside the root, and all other config sections, are left alone. Do not
 `Cargo.lock` generated under these patches: it records source-less local entries that no other
 machine can resolve.
 
+When `sccache` is installed, sync also configures it as Cargo's `rustc-wrapper`, allowing unchanged
+compilation units to be reused across the workspace's otherwise-independent Cargo target directories.
+An existing wrapper is always preserved.
+
 At most once per day (tracked by a stamp file inside the workspace's `.git`, so git never
 sees it), the sync also floats dependencies: `uv sync -U` instead of plain `uv sync`, plus
 a parallel `cargo update` in every member with a `Cargo.toml`, printing what moved. Pass

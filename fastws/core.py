@@ -606,6 +606,21 @@ def _sync_cargo_patches(root: Path) -> tuple[list[str], list[str]]:
     after = {n for entries in tables.values() for n in entries}
     return sorted(after - before), sorted(before - after)
 
+def _sync_cargo_wrapper(root: Path) -> bool:
+    "Add sccache to the generated Cargo config when installed, without overriding another wrapper"
+    if not (wrapper := shutil.which("sccache")): return False
+    config = root/".cargo"/"config.toml"
+    content = config.read_text() if config.exists() else ""
+    data = tomllib.loads(content) if content else {}
+    if data.get("build", {}).get("rustc-wrapper"): return False
+    line = f'rustc-wrapper = {json.dumps(wrapper)}\n'
+    if match := re.search(r"(?m)^\[build\][^\n]*\n", content): new = content[:match.end()] + line + content[match.end():]
+    else: new = content.rstrip() + ("\n\n" if content.strip() else "") + "[build]\n" + line
+    tomllib.loads(new)
+    config.parent.mkdir(exist_ok=True)
+    config.write_text(new)
+    return True
+
 def _cargo_dep_tables(data):
     for name in "dependencies","build-dependencies": yield data.get(name, {})
     for target in data.get("target", {}).values():
@@ -698,9 +713,11 @@ async def ws_sync(
 
     if missing_projects := _sync_ws_pyproject(pyproject_path, template_path, _ws_projects(root), _external_projects(root, ext_dirs)): print(f"Added workspace projects: {', '.join(missing_projects)}")
 
+    wrapper_added = _sync_cargo_wrapper(root)
     added_p, removed_p = _sync_cargo_patches(root)
     if added_p: print(f"Cargo patches added: {', '.join(added_p)}")
     if removed_p: print(f"Cargo patches removed: {', '.join(removed_p)}")
+    if wrapper_added: print("Cargo builds now use sccache")
 
     if bad := [d.name for d in _ws_dirs(root) if not (d/"pyproject.toml").exists()]:
         print(f"⚠️  Skipping uv sync, not Python projects yet (scaffold with e.g. nbdev-new or ship-new, or remove): {', '.join(bad)}")
