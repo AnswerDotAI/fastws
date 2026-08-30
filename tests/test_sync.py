@@ -330,3 +330,27 @@ def test_sync_cargo_patches_generates_and_preserves(tmp_path):
     (bare/'c'/'Cargo.toml').write_text('[package]\nname = "c"\n')
     core._sync_cargo_patches(bare)
     assert core.tomllib.loads((bare/'.cargo'/'config.toml').read_text())['patch']['crates-io']['c']['path'] == str(bare/'c')
+
+
+def test_sync_cargo_wrapper(tmp_path, monkeypatch):
+    config = tmp_path/'.cargo'/'config.toml'
+    config.parent.mkdir()
+    config.write_text('[term]\nquiet = true\n')
+    monkeypatch.setattr(core.shutil, 'which', lambda name: '/opt/homebrew/bin/sccache')
+
+    assert core._sync_cargo_wrapper(tmp_path)
+    data = core.tomllib.loads(config.read_text())
+    assert data['build']['rustc-wrapper'] == '/opt/homebrew/bin/sccache'
+    assert data['term']['quiet'] is True
+    assert not core._sync_cargo_wrapper(tmp_path)
+
+    (tmp_path/'crate').mkdir()
+    (tmp_path/'crate'/'Cargo.toml').write_text('[package]\nname = "crate"\n')
+    core._sync_cargo_patches(tmp_path)
+    content = config.read_text()
+    assert not core._sync_cargo_wrapper(tmp_path)
+    assert core._sync_cargo_patches(tmp_path) == ([], []) and config.read_text() == content
+
+    config.write_text('[build]\nrustc-wrapper = "other-cache"\n')
+    assert not core._sync_cargo_wrapper(tmp_path)
+    assert core.tomllib.loads(config.read_text())['build']['rustc-wrapper'] == 'other-cache'
