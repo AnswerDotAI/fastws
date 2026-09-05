@@ -384,11 +384,29 @@ def test_npm_dirs_discovers_root_and_subdir_packages(tmp_path):
     (tmp_path/'app'/'tools').mkdir()
     (tmp_path/'app'/'tools'/'package.json').write_text('{}')  # a root package owns its subdirs: not a separate member
     for name in ('wasm', 'node_modules', 'pkg', '_tmp', 'docs'): (tmp_path/'crate'/name).mkdir()
-    for name in ('wasm', 'node_modules', 'pkg', '_tmp'): (tmp_path/'crate'/name/'package.json').write_text('{}')
+    for name in ('wasm', 'node_modules', 'pkg', '_tmp', 'docs'): (tmp_path/'crate'/name/'package.json').write_text('{}')
+    for name in ('wasm', 'node_modules', 'pkg', '_tmp'): (tmp_path/'crate'/name/'Cargo.toml').write_text('')  # docs: a plain package in a subdir, not a native binding
     (tmp_path/'_scratch'/'package.json').write_text('{}')
     (tmp_path/'node_modules'/'package.json').write_text('{}')
 
     assert core._npm_dirs(tmp_path) == [tmp_path/'app', tmp_path/'crate'/'wasm']
+
+
+def test_npm_dirs_honours_fastws_exclude(tmp_path):
+    (tmp_path/'pyproject.toml').write_text('[tool.fastws]\nexclude = ["app", "tool*"]\n')
+    for name in ('app', 'lib', 'tools'):
+        (tmp_path/name).mkdir()
+        (tmp_path/name/'package.json').write_text('{}')
+
+    assert core._npm_dirs(tmp_path) == [tmp_path/'lib']
+
+
+def test_js_tool_default_npm_rejects_others(tmp_path):
+    assert core._js_tool(tmp_path) == 'npm'
+    (tmp_path/'pyproject.toml').write_text('[tool.fastws]\njs = "bun"\n')
+    assert core._js_tool(tmp_path) == 'bun'
+    (tmp_path/'pyproject.toml').write_text('[tool.fastws]\njs = "pnpm"\n')
+    with pytest.raises(SystemExit, match='pnpm'): core._js_tool(tmp_path)
 
 
 def test_sync_ws_package_json_generates_and_preserves(tmp_path):
@@ -427,6 +445,7 @@ def test_ws_excludes_treat_npm_only_dirs_like_cargo_only(tmp_path):
 
 def test_sync_js_installs_then_builds_stale_native_members(tmp_path, monkeypatch):
     (tmp_path/'pyproject.toml').write_text('[tool.fastws]\njs = "bun"\n')
+    monkeypatch.setattr(core.shutil, 'which', lambda t: f'/usr/bin/{t}')
     app = tmp_path/'app'
     app.mkdir()
     (app/'package.json').write_text('{}')
@@ -441,6 +460,12 @@ def test_sync_js_installs_then_builds_stale_native_members(tmp_path, monkeypatch
     calls = []
     monkeypatch.setattr(core.subprocess, 'run', lambda cmd, **kw: calls.append((cmd, kw.get('cwd'))))
     members = [app, wasm]
+
+    # a tool that is not installed stops the sync with a one-line message before anything runs
+    monkeypatch.setattr(core.shutil, 'which', lambda t: None)
+    with pytest.raises(SystemExit, match='bun'): core._sync_js(tmp_path, members)
+    assert calls == []
+    monkeypatch.setattr(core.shutil, 'which', lambda t: f'/usr/bin/{t}')
 
     # install at the root with the configured tool; a native member with no pkg/ yet is built
     assert core._sync_js(tmp_path, members) == [wasm]

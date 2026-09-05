@@ -706,20 +706,22 @@ def _cargo_update(root: Path, workers: int = 16):
 _JS_SKIP = {"node_modules", "pkg"}
 
 def _npm_dirs(root: Path) -> list[Path]:
-    "JS members: a root repo dir with a package.json, else its immediate subdirs that have one; `_`-prefixed names and build outputs are skipped"
+    "JS members: a root repo dir with a package.json, else its immediate subdirs with a package.json and a Cargo.toml (native bindings); `_`-prefixed names, build outputs, and `[tool.fastws].exclude` matches are skipped"
+    exclude = _fastws_cfg(root).get("exclude", [])
     def ok(d): return d.is_dir() and not d.name.startswith((".", "_")) and d.name not in _JS_SKIP
     res = []
     for d in sorted(root.iterdir()):
-        if not ok(d): continue
+        if not ok(d) or any(_matches_ws(d.name, e) for e in exclude): continue
         if (d/"package.json").exists(): res.append(d)
-        else: res += [p for p in sorted(d.iterdir()) if ok(p) and (p/"package.json").exists()]
+        else: res += [p for p in sorted(d.iterdir()) if ok(p) and (p/"package.json").exists() and (p/"Cargo.toml").exists()]
     return res
 
 def _sync_ws_package_json(root: Path, members: list[Path]) -> tuple[list[str], list[str]]:
     """Regenerate `workspaces` in the root package.json (created when first needed) and return (added, removed).
 
     Entries pointing outside `root` and globs are kept as-is. Entries for dirs inside it are regenerated
-    from `members`, so the JS install links every discovered package: the npm analog of editable installs."""
+    from `members`, so the JS install links every discovered package: the npm analog of editable installs.
+    Only the list form of `workspaces` is managed; the object form (`{"packages": [...]}`) is not supported."""
     path = root/"package.json"
     data = json.loads(path.read_text()) if path.exists() else {"private": True}
     cur = list(data.get("workspaces") or [])
@@ -731,8 +733,10 @@ def _sync_ws_package_json(root: Path, members: list[Path]) -> tuple[list[str], l
     return [e for e in new if e not in cur], [e for e in cur if e not in new]
 
 def _js_tool(root: Path) -> str:
-    "The JS package manager: `[tool.fastws].js` in the workspace pyproject, default npm (bun and pnpm read the same `workspaces` list)"
-    return _fastws_cfg(root).get("js", "npm")
+    "The JS package manager: `[tool.fastws].js` in the workspace pyproject, default npm; bun reads the same `workspaces` list"
+    tool = _fastws_cfg(root).get("js", "npm")
+    if tool not in ("npm", "bun"): raise SystemExit(f"[tool.fastws].js must be npm or bun, not {tool!r}")
+    return tool
 
 def _js_stale(root: Path, d: Path) -> bool:
     "Does JS member `d` need its build script? Only members with a Cargo.toml build natively, into `pkg/`, which is stale when missing or older than any source in the member's repo (the parent crate included)"
@@ -743,6 +747,7 @@ def _js_stale(root: Path, d: Path) -> bool:
 def _sync_js(root: Path, members: list[Path]) -> list[Path]:
     "Install the JS workspace at `root`, then run the build script of each native member whose output is stale (the JS analog of `maturin develop`); returns the members built"
     tool = _js_tool(root)
+    if not shutil.which(tool): raise SystemExit(f"{tool} is not installed: install it, or set [tool.fastws].js to a package manager that is")
     subprocess.run([tool, "install"], check=True, cwd=root)
     built = [d for d in members if _js_stale(root, d)]
     for d in built: subprocess.run([tool, "run", "build"], check=True, cwd=d)
