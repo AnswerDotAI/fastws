@@ -383,22 +383,27 @@ def test_npm_dirs_discovers_root_and_subdir_packages(tmp_path):
     (tmp_path/'app'/'package.json').write_text('{}')
     (tmp_path/'app'/'tools').mkdir()
     (tmp_path/'app'/'tools'/'package.json').write_text('{}')  # a root package owns its subdirs: not a separate member
-    for name in ('wasm', 'node_modules', 'pkg', '_tmp', 'docs'): (tmp_path/'crate'/name).mkdir()
-    for name in ('wasm', 'node_modules', 'pkg', '_tmp', 'docs'): (tmp_path/'crate'/name/'package.json').write_text('{}')
-    for name in ('wasm', 'node_modules', 'pkg', '_tmp'): (tmp_path/'crate'/name/'Cargo.toml').write_text('')  # docs: a plain package in a subdir, not a native binding
+    (tmp_path/'app'/'package-lock.json').write_text('{}')  # a repo's own lockfile does not opt it out: every checkout is in the workspace
+    for name in ('wasm', 'node_modules', 'pkg', '_tmp', 'docs', 'frontend'): (tmp_path/'crate'/name).mkdir()
+    for name in ('wasm', 'node_modules', 'pkg', '_tmp', 'docs', 'frontend'): (tmp_path/'crate'/name/'package.json').write_text('{}')
+    (tmp_path/'crate'/'wasm'/'Cargo.toml').write_text('')  # native binding; docs is a plain package and joins the same way
+    (tmp_path/'crate'/'frontend'/'bun.lock').write_text('')  # a subdir with its own lockfile manages itself
     (tmp_path/'_scratch'/'package.json').write_text('{}')
     (tmp_path/'node_modules'/'package.json').write_text('{}')
 
-    assert core._npm_dirs(tmp_path) == [tmp_path/'app', tmp_path/'crate'/'wasm']
+    assert core._npm_dirs(tmp_path) == [tmp_path/'app', tmp_path/'crate'/'docs', tmp_path/'crate'/'wasm']
 
 
 def test_npm_dirs_honours_fastws_exclude(tmp_path):
-    (tmp_path/'pyproject.toml').write_text('[tool.fastws]\nexclude = ["app", "tool*"]\n')
+    (tmp_path/'pyproject.toml').write_text('[tool.fastws]\nexclude = ["app", "tool*", "py/examples"]\n')
     for name in ('app', 'lib', 'tools'):
         (tmp_path/name).mkdir()
         (tmp_path/name/'package.json').write_text('{}')
+    for name in ('examples', 'wasm'):
+        (tmp_path/'py'/name).mkdir(parents=True)
+        (tmp_path/'py'/name/'package.json').write_text('{}')  # examples is excluded by its root-relative path
 
-    assert core._npm_dirs(tmp_path) == [tmp_path/'lib']
+    assert core._npm_dirs(tmp_path) == [tmp_path/'lib', tmp_path/'py'/'wasm']
 
 
 def test_js_tool_default_npm_rejects_others(tmp_path):

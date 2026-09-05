@@ -704,16 +704,21 @@ def _cargo_update(root: Path, workers: int = 16):
                 print(f"{name}:\n" + "\n".join(lines))
 
 _JS_SKIP = {"node_modules", "pkg"}
+_JS_LOCKS = ("bun.lock", "package-lock.json", "yarn.lock", "pnpm-lock.yaml")
 
 def _npm_dirs(root: Path) -> list[Path]:
-    "JS members: a root repo dir with a package.json, else its immediate subdirs with a package.json and a Cargo.toml (native bindings); `_`-prefixed names, build outputs, and `[tool.fastws].exclude` matches are skipped"
+    """JS members: a root repo dir with a package.json, else its immediate subdirs with a package.json.
+
+    A subdir with its own lockfile manages itself and stays out; a root repo is always in. `[tool.fastws].exclude`
+    matches the root-relative path (`ghapi/examples`). `_`-prefixed names and build outputs are skipped."""
     exclude = _fastws_cfg(root).get("exclude", [])
     def ok(d): return d.is_dir() and not d.name.startswith((".", "_")) and d.name not in _JS_SKIP
+    def excluded(d): return any(_matches_ws(os.path.relpath(d, root), e) for e in exclude)
     res = []
     for d in sorted(root.iterdir()):
-        if not ok(d) or any(_matches_ws(d.name, e) for e in exclude): continue
+        if not ok(d) or excluded(d): continue
         if (d/"package.json").exists(): res.append(d)
-        else: res += [p for p in sorted(d.iterdir()) if ok(p) and (p/"package.json").exists() and (p/"Cargo.toml").exists()]
+        else: res += [p for p in sorted(d.iterdir()) if ok(p) and (p/"package.json").exists() and not excluded(p) and not any((p/l).exists() for l in _JS_LOCKS)]
     return res
 
 def _sync_ws_package_json(root: Path, members: list[Path]) -> tuple[list[str], list[str]]:
