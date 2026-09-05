@@ -1,4 +1,4 @@
-import os, pytest
+import json, os, pytest, time
 from types import SimpleNamespace
 from fastgit import Git
 import fastws.core as core
@@ -376,3 +376,85 @@ def test_sync_cargo_wrapper(tmp_path, monkeypatch):
     config.write_text('[build]\nrustc-wrapper = "other-cache"\n')
     assert not core._sync_cargo_wrapper(tmp_path)
     assert core.tomllib.loads(config.read_text())['build']['rustc-wrapper'] == 'other-cache'
+
+
+def test_npm_dirs_discovers_root_and_subdir_packages(tmp_path):
+    for name in ('app', 'crate', 'plain', '_scratch', 'node_modules'): (tmp_path/name).mkdir()
+    (tmp_path/'app'/'package.json').write_text('{}')
+    (tmp_path/'app'/'tools').mkdir()
+    (tmp_path/'app'/'tools'/'package.json').write_text('{}')  # a root package owns its subdirs: not a separate member
+    for name in ('wasm', 'node_modules', 'pkg', '_tmp', 'docs'): (tmp_path/'crate'/name).mkdir()
+    for name in ('wasm', 'node_modules', 'pkg', '_tmp'): (tmp_path/'crate'/name/'package.json').write_text('{}')
+    (tmp_path/'_scratch'/'package.json').write_text('{}')
+    (tmp_path/'node_modules'/'package.json').write_text('{}')
+
+    assert core._npm_dirs(tmp_path) == [tmp_path/'app', tmp_path/'crate'/'wasm']
+
+
+def test_sync_ws_package_json_generates_and_preserves(tmp_path):
+    pkg = tmp_path/'package.json'
+    pkg.write_text('{\n  "name": "ws",\n  "private": true,\n  "workspaces": ["../outside", "gone", "tools/*"]\n}\n')
+    members = [tmp_path/'app', tmp_path/'crate'/'wasm']
+
+    added, removed = core._sync_ws_package_json(tmp_path, members)
+    data = json.loads(pkg.read_text())
+    # kept: entries outside the root and globs; managed: existing dirs regenerated from discovery
+    assert data['workspaces'] == ['../outside', 'tools/*', 'app', 'crate/wasm']
+    assert data['name'] == 'ws' and data['private'] is True  # other keys untouched
+    assert added == ['app', 'crate/wasm'] and removed == ['gone']
+
+    content = pkg.read_text()
+    assert core._sync_ws_package_json(tmp_path, members) == ([], [])
+    assert pkg.read_text() == content
+
+    # a missing root package.json is created
+    bare = tmp_path/'ws2'
+    bare.mkdir()
+    assert core._sync_ws_package_json(bare, [bare/'a']) == (['a'], [])
+    assert json.loads((bare/'package.json').read_text()) == {'private': True, 'workspaces': ['a']}
+
+
+def test_ws_excludes_treat_npm_only_dirs_like_cargo_only(tmp_path):
+    pyproject = tmp_path/'pyproject.toml'
+    pyproject.write_text('[project]\nname = "uvws"\n\n[tool.uv.workspace]\nmembers = ["./*"]\nexclude = []\n')
+    for name in ('app', 'pending'): (tmp_path/name).mkdir()
+    (tmp_path/'app'/'package.json').write_text('{}')
+
+    # a tracked npm-only checkout is a valid JS project: excluded from uv, never pending; an empty tracked dir still awaits scaffolding
+    assert core._sync_ws_excludes(pyproject, tmp_path, {'app', 'pending'}) == (['app'], [])
+    assert core._pending_dirs(tmp_path) == ['pending']
+
+
+def test_sync_js_installs_then_builds_stale_native_members(tmp_path, monkeypatch):
+    (tmp_path/'pyproject.toml').write_text('[tool.fastws]\njs = "bun"\n')
+    app = tmp_path/'app'
+    app.mkdir()
+    (app/'package.json').write_text('{}')
+    crate = tmp_path/'crate'
+    wasm = crate/'wasm'
+    for d in (crate/'src', wasm/'src'): d.mkdir(parents=True)
+    (crate/'Cargo.toml').write_text('[package]\nname = "crate"\n')
+    (crate/'src'/'lib.rs').write_text('')
+    (wasm/'Cargo.toml').write_text('[package]\nname = "crate-wasm"\n')
+    (wasm/'package.json').write_text('{}')
+    (wasm/'src'/'lib.rs').write_text('')
+    calls = []
+    monkeypatch.setattr(core.subprocess, 'run', lambda cmd, **kw: calls.append((cmd, kw.get('cwd'))))
+    members = [app, wasm]
+
+    # install at the root with the configured tool; a native member with no pkg/ yet is built
+    assert core._sync_js(tmp_path, members) == [wasm]
+    assert calls == [(['bun', 'install'], tmp_path), (['bun', 'run', 'build'], wasm)]
+
+    # a pkg/ newer than every source in the member's repo means nothing to rebuild
+    (wasm/'pkg').mkdir()
+    (wasm/'pkg'/'out.wasm').write_text('')
+    now = time.time()
+    os.utime(wasm/'pkg'/'out.wasm', (now+10, now+10))
+    calls.clear()
+    assert core._sync_js(tmp_path, members) == []
+    assert calls == [(['bun', 'install'], tmp_path)]
+
+    # a change anywhere in that repo, including the parent crate the wasm depends on, makes it stale again
+    os.utime(crate/'src'/'lib.rs', (now+20, now+20))
+    assert core._sync_js(tmp_path, members) == [wasm]

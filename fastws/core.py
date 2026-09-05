@@ -84,6 +84,12 @@ def _ws_cfg(root: Path):
     exclude = ws.get("exclude") or []
     return members, exclude
 
+def _fastws_cfg(root: Path) -> dict:
+    "The `[tool.fastws]` table from the workspace root pyproject.toml (empty when absent)."
+    pyproj = root/"pyproject.toml"
+    if not pyproj.exists(): return {}
+    return tomllib.loads(pyproj.read_text(encoding="utf-8")).get("tool", {}).get("fastws", {})
+
 def _matches_ws(name: str, pattern: str) -> bool:
     pattern = pattern.strip()
     return any(fnmatch.fnmatch(candidate, normalized) for candidate in (name, f"./{name}") for normalized in (pattern, pattern.removeprefix("./")))
@@ -176,13 +182,21 @@ def _cargo_only(d: Path) -> bool:
     "A Rust crate with no Python layer: not a pending scaffold, just not a uv workspace member"
     return (d/"Cargo.toml").exists() and not (d/"pyproject.toml").exists()
 
+def _npm_only(d: Path) -> bool:
+    "A JS package with no Python layer: not a pending scaffold, just not a uv workspace member"
+    return (d/"package.json").exists() and not (d/"pyproject.toml").exists()
+
+def _pending_dirs(root: Path) -> list[str]:
+    "uv workspace dirs that are not Python projects yet; sync stops rather than let uv fail on them"
+    return [d.name for d in _ws_dirs(root) if not (d/"pyproject.toml").exists()]
+
 def _sync_ws_excludes(pyproject_path: Path, root: Path, tracked: set[str]) -> tuple[list[str], list[str]]:
     """Regenerate `tool.uv.workspace.exclude` and return (added, removed).
 
     Kept as-is: `[tool.fastws].exclude` entries (intent), globs, missing dirs, and tracked dirs
     (repos.txt checkouts) that are still not valid Python projects. Auto-managed: entries for other
     existing dirs are regenerated each sync, excluding dirs without a valid pyproject (tracked dirs
-    only when they are Cargo-only crates, since a tracked dir with neither file is a pending member
+    only when they are Cargo-only crates or npm-only packages, since a tracked dir with none of those files is a pending member
     awaiting scaffolding) and un-excluding dirs that gained one; deliberately excluding a real
     project takes a `[tool.fastws]` entry."""
     if not pyproject_path.exists(): return [], []
@@ -197,7 +211,7 @@ def _sync_ws_excludes(pyproject_path: Path, root: Path, tracked: set[str]) -> tu
     auto = [d.name for d in sorted(root.iterdir())
             if d.is_dir() and not d.name.startswith(".") and any(_matches_ws(d.name, m) for m in members)
             and not any(_matches_ws(d.name, e) for e in kept)
-            and (d.name not in tracked or _cargo_only(d)) and not _valid_project_dir(d)]
+            and (d.name not in tracked or _cargo_only(d) or _npm_only(d)) and not _valid_project_dir(d)]
     survivors = set(kept) | set(auto)
     new = [e for e in cur if e in survivors] + [e for e in kept + auto if e not in cur]
     if new == cur: return [], []
@@ -437,11 +451,11 @@ def ws_branches(
 
 _BUILD_SKIP_DIRS = {".git", "__pycache__", ".venv", "node_modules", "dist", "build", "target", ".ipynb_checkpoints", ".pytest_cache", ".mypy_cache"}
 
-def _src_mtime(d: Path) -> float:
-    "Newest file mtime under `d`, ignoring VCS internals and build outputs"
+def _src_mtime(d: Path, skip: set[str] = _BUILD_SKIP_DIRS) -> float:
+    "Newest file mtime under `d`, ignoring VCS internals and build outputs (the dir names in `skip`)"
     newest = 0.0
     for dirpath, dirnames, filenames in os.walk(d):
-        dirnames[:] = [o for o in dirnames if o not in _BUILD_SKIP_DIRS and not o.endswith(".egg-info")]
+        dirnames[:] = [o for o in dirnames if o not in skip and not o.endswith(".egg-info")]
         for f in filenames:
             try: newest = max(newest, os.stat(os.path.join(dirpath, f)).st_mtime)
             except OSError: pass
@@ -689,6 +703,51 @@ def _cargo_update(root: Path, workers: int = 16):
             elif lines := [l for l in out.splitlines() if l.lstrip().startswith(("Updating ", "Adding ", "Removing ")) and "crates.io index" not in l]:
                 print(f"{name}:\n" + "\n".join(lines))
 
+_JS_SKIP = {"node_modules", "pkg"}
+
+def _npm_dirs(root: Path) -> list[Path]:
+    "JS members: a root repo dir with a package.json, else its immediate subdirs that have one; `_`-prefixed names and build outputs are skipped"
+    def ok(d): return d.is_dir() and not d.name.startswith((".", "_")) and d.name not in _JS_SKIP
+    res = []
+    for d in sorted(root.iterdir()):
+        if not ok(d): continue
+        if (d/"package.json").exists(): res.append(d)
+        else: res += [p for p in sorted(d.iterdir()) if ok(p) and (p/"package.json").exists()]
+    return res
+
+def _sync_ws_package_json(root: Path, members: list[Path]) -> tuple[list[str], list[str]]:
+    """Regenerate `workspaces` in the root package.json (created when first needed) and return (added, removed).
+
+    Entries pointing outside `root` and globs are kept as-is. Entries for dirs inside it are regenerated
+    from `members`, so the JS install links every discovered package: the npm analog of editable installs."""
+    path = root/"package.json"
+    data = json.loads(path.read_text()) if path.exists() else {"private": True}
+    cur = list(data.get("workspaces") or [])
+    kept = [e for e in cur if any(c in e for c in "*?[") or not (root/e).resolve().is_relative_to(root.resolve())]
+    new = kept + [e for e in (os.path.relpath(d, root) for d in members) if e not in kept]
+    if new == cur: return [], []
+    data["workspaces"] = new
+    path.write_text(json.dumps(data, indent=2) + "\n")
+    return [e for e in new if e not in cur], [e for e in cur if e not in new]
+
+def _js_tool(root: Path) -> str:
+    "The JS package manager: `[tool.fastws].js` in the workspace pyproject, default npm (bun and pnpm read the same `workspaces` list)"
+    return _fastws_cfg(root).get("js", "npm")
+
+def _js_stale(root: Path, d: Path) -> bool:
+    "Does JS member `d` need its build script? Only members with a Cargo.toml build natively, into `pkg/`, which is stale when missing or older than any source in the member's repo (the parent crate included)"
+    if not (d/"Cargo.toml").exists(): return False
+    pkg, repo = d/"pkg", d if d.parent.resolve() == root.resolve() else d.parent
+    return not pkg.exists() or _src_mtime(pkg) < _src_mtime(repo, _BUILD_SKIP_DIRS | _JS_SKIP)
+
+def _sync_js(root: Path, members: list[Path]) -> list[Path]:
+    "Install the JS workspace at `root`, then run the build script of each native member whose output is stale (the JS analog of `maturin develop`); returns the members built"
+    tool = _js_tool(root)
+    subprocess.run([tool, "install"], check=True, cwd=root)
+    built = [d for d in members if _js_stale(root, d)]
+    for d in built: subprocess.run([tool, "run", "build"], check=True, cwd=d)
+    return built
+
 @call_parse
 async def ws_sync(
     workspace: str = "",  # Workspace root; defaults to active venv parent when available
@@ -725,7 +784,12 @@ async def ws_sync(
     if removed_p: print(f"Cargo patches removed: {', '.join(removed_p)}")
     if wrapper_added: print("Cargo builds now use sccache")
 
-    if bad := [d.name for d in _ws_dirs(root) if not (d/"pyproject.toml").exists()]:
+    js_members = _npm_dirs(root)
+    added_j, removed_j = _sync_ws_package_json(root, js_members)
+    if added_j: print(f"JS workspace packages added: {', '.join(added_j)}")
+    if removed_j: print(f"JS workspace packages removed: {', '.join(removed_j)}")
+
+    if bad := _pending_dirs(root):
         print(f"⚠️  Skipping uv sync, not Python projects yet (scaffold with e.g. nbdev-new or ship-new, or remove): {', '.join(bad)}")
         return
     up = upgrade or _should_upgrade(root)
@@ -733,6 +797,7 @@ async def ws_sync(
     _sync_cargo_keys(root)
     subprocess.run(["uv", "sync", "-U"] if up else ["uv", "sync"], check=True, cwd=root)
     if up: _upgrade_stamp(root).touch()
+    if js_members and (built := _sync_js(root, js_members)): print(f"JS packages built: {', '.join(os.path.relpath(d, root) for d in built)}")
 
 @call_parse
 async def ws_add(
