@@ -10,7 +10,7 @@ from fastcore.parallel import parallel_async
 from ghapi.core import APIError, GhApi, dep_closure, local_dep_graph
 from packaging.version import InvalidVersion, Version
 
-from .core import _fastws_cfg, _load_repo_entries, _load_repos, _resolve_path, _ws_root
+from .core import _fastws_cfg, _load_repo_entries, _resolve_path, _ws_root
 
 # Start-of-message regexes for commits that need no release (curation noise, CI config, docs regen)
 DEFAULT_SKIP = ["bump$", "Bump version to ", "meta", "auto", "README", "regen readme", "nbdev regen",
@@ -66,7 +66,7 @@ def _cwd_project(root: Path, repos_file: str = "repos.txt") -> str|None:
 async def check_releases(project: str = None, skip=None, workspace: str = "", repos_file: str = "repos.txt", nodeps: bool = False) -> ReleaseReport:
     "Sweep every workspace repo for unreleased commits; a `project` (given, or detected from cwd inside a member checkout) limits the sweep to its transitive dependency closure, or to itself alone with `nodeps`. `[tool.fastws].release_exclude` names repos to leave out (apps that deploy rather than release)."
     root = _ws_root(workspace)
-    repos = _load_repos(_resolve_path(root, repos_file))
+    repos = [r for r,d in _load_repo_entries(_resolve_path(root, repos_file), root)]
     excl = {e.casefold() for e in _fastws_cfg(root).get("release_exclude", [])}
     repos = [r for r in repos if r.split("/")[-1].casefold() not in excl]
     if project is None: project = _cwd_project(root, repos_file)

@@ -1,5 +1,25 @@
 <!-- do not remove -->
 
+## 0.0.14
+
+### New Features
+
+- Bootstrap workspaces with ws-setup ([#32](https://github.com/AnswerDotAI/fastws/pull/32)), thanks to [@jph00](https://github.com/jph00)
+
+
+## 0.0.13
+
+### New Features
+
+- Build a selected package and its workspace dependencies ([#31](https://github.com/AnswerDotAI/fastws/pull/31)), thanks to [@jph00](https://github.com/jph00)
+- Cache Rust compilation across workspace projects ([#28](https://github.com/AnswerDotAI/fastws/pull/28)), thanks to [@jph00](https://github.com/jph00)
+- Add --workers option to ws-add ([#27](https://github.com/AnswerDotAI/fastws/pull/27)), thanks to [@ncoop57](https://github.com/ncoop57)
+
+### Bugs Squashed
+
+- Ignore unused Cargo patches in build cache keys ([#29](https://github.com/AnswerDotAI/fastws/pull/29)), thanks to [@jph00](https://github.com/jph00)
+
+
 ## 0.0.12
 
 ### New Features
