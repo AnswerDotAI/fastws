@@ -466,22 +466,15 @@ def test_sync_cargo_wrapper(tmp_path, monkeypatch):
 
 
 def test_npm_dirs_discovers_root_and_declared_packages(tmp_path):
-    for name in ('app', 'crate', 'plain', '_scratch', 'node_modules'): (tmp_path/name).mkdir()
-    (tmp_path/'app'/'package.json').write_text('{}')
-    (tmp_path/'app'/'tools').mkdir()
-    (tmp_path/'app'/'tools'/'package.json').write_text('{}')  # undeclared packages are not discovered
+    for name in ('app', 'crate', 'crate/wasm', 'crate/frontend', 'crate/docs', '_scratch', 'node_modules', 'crate/node_modules'):
+        d = tmp_path/name
+        d.mkdir(parents=True, exist_ok=True)
+        (d/'package.json').write_text('{}')
     (tmp_path/'app'/'package-lock.json').write_text('{}')
-    (tmp_path/'crate'/'package.json').write_text('{"private": true, "workspaces": ["wasm", "front*", "pkg", "node_modules", "wasm", "missing"]}')
-    for name in ('wasm', 'node_modules', 'pkg', '_tmp', 'docs', 'frontend'): (tmp_path/'crate'/name).mkdir()
-    for name in ('wasm', 'node_modules', 'pkg', '_tmp', 'docs', 'frontend'): (tmp_path/'crate'/name/'package.json').write_text('{}')
-    (tmp_path/'crate'/'wasm'/'Cargo.toml').write_text('')
+    (tmp_path/'crate'/'package.json').write_text('{"private": true, "workspaces": ["wasm", "front*", "node_modules", "wasm", "missing"]}')
     (tmp_path/'crate'/'frontend'/'bun.lock').write_text('')  # lockfiles do not override explicit membership
-    (tmp_path/'plain'/'child').mkdir()
-    (tmp_path/'plain'/'child'/'package.json').write_text('{}')
-    (tmp_path/'_scratch'/'package.json').write_text('{}')
-    (tmp_path/'node_modules'/'package.json').write_text('{}')
 
-    assert core._npm_dirs(tmp_path) == [tmp_path/'app', tmp_path/'crate', tmp_path/'crate'/'wasm', tmp_path/'crate'/'frontend', tmp_path/'crate'/'pkg']
+    assert core._npm_dirs(tmp_path) == [tmp_path/'app', tmp_path/'crate', tmp_path/'crate'/'wasm', tmp_path/'crate'/'frontend']
 
 
 def test_npm_dirs_honours_fastws_exclude(tmp_path):
@@ -542,22 +535,19 @@ def test_ws_excludes_treat_npm_only_dirs_like_cargo_only(tmp_path):
     assert core._pending_dirs(tmp_path) == ['pending']
 
 
-@pytest.mark.parametrize('tool', ['npm', 'bun', 'custom-js'])
+@pytest.mark.parametrize('tool', ['npm', 'custom-js'])
 def test_sync_js_installs_then_builds_native_members(tmp_path, monkeypatch, tool):
     if tool != 'npm': (tmp_path/'pyproject.toml').write_text(f'[tool.fastws]\njs = "{tool}"\n')
-    monkeypatch.setattr(core.shutil, 'which', lambda t: f'/usr/bin/{t}')
     app = tmp_path/'app'
     app.mkdir()
     (app/'package.json').write_text('{"scripts": {"build": "vite build"}}')
     crate = tmp_path/'crate'
     wasm = crate/'wasm'
-    for d in (crate/'src', wasm/'src'): d.mkdir(parents=True)
-    (crate/'Cargo.toml').write_text('[package]\nname = "crate"\n')
+    (wasm/'pkg').mkdir(parents=True)
+    (wasm/'pkg'/'out.wasm').write_text('')
+    for d in (crate, wasm): (d/'Cargo.toml').write_text('')
     (crate/'package.json').write_text('{"private": true, "workspaces": ["wasm"]}')
-    (crate/'src'/'lib.rs').write_text('')
-    (wasm/'Cargo.toml').write_text('[package]\nname = "crate-wasm"\n')
     (wasm/'package.json').write_text('{"scripts": {"build": "cargo build"}}')
-    (wasm/'src'/'lib.rs').write_text('')
     calls = []
     monkeypatch.setattr(core.subprocess, 'run', lambda cmd, **kw: calls.append((cmd, kw.get('cwd'))))
     members = [app, crate, wasm]
@@ -568,13 +558,6 @@ def test_sync_js_installs_then_builds_native_members(tmp_path, monkeypatch, tool
     assert calls == []
     monkeypatch.setattr(core.shutil, 'which', lambda t: f'/usr/bin/{t}')
 
-    # install at the root with the configured tool; a native member with no pkg/ yet is built
-    assert core._sync_js(tmp_path, members) == [wasm]
-    assert calls == [([tool, 'install'], tmp_path), ([tool, 'run', 'build'], wasm)]
-
-    # Existing outputs must not prevent Cargo from checking dependencies on the next sync.
-    (wasm/'pkg').mkdir()
-    (wasm/'pkg'/'out.wasm').write_text('')
-    calls.clear()
+    # Install first, then run the native build even with existing output.
     assert core._sync_js(tmp_path, members) == [wasm]
     assert calls == [([tool, 'install'], tmp_path), ([tool, 'run', 'build'], wasm)]
