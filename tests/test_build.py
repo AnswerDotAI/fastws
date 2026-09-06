@@ -1,6 +1,5 @@
 import os, time
-import pytest
-import fastws.core as core
+import pytest, fastws.core as core
 
 
 def _mk_proj(root, name, version="0.1.0"):
@@ -8,8 +7,7 @@ def _mk_proj(root, name, version="0.1.0"):
     d.mkdir()
     (d/"pyproject.toml").write_text(
         f'[project]\nname = "{name}"\nversion = "{version}"\n'
-        '[build-system]\nrequires = ["setuptools"]\nbuild-backend = "setuptools.build_meta"\n'
-    )
+        '[build-system]\nrequires = ["setuptools"]\nbuild-backend = "setuptools.build_meta"\n')
     (d/(name.replace("-", "_") + ".py")).write_text("x = 1\n")
     return d
 
