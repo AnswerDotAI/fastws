@@ -33,6 +33,7 @@ dev = [
 ]
 
 [project.scripts]
+ws-setup = "fastws.core:ws_setup"
 ws-clone = "fastws.core:ws_clone"
 ws-pull = "fastws.core:ws_pull"
 ws-status = "fastws.core:ws_status"
@@ -48,6 +49,11 @@ Homepage = "https://github.com/AnswerDotAI/fastws"
 
 [tool.pytest.ini_options]
 asyncio_mode = "auto"
+markers = ["slow: builds and installs a fresh workspace; may fetch package dependencies"]
+addopts = "-m 'not slow'"
 
 [tool.setuptools.dynamic]
 version = { attr = "fastws.__version__" }
+
+[tool.setuptools.packages.find]
+include = ["fastws"]

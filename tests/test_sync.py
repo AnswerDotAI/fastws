@@ -258,7 +258,7 @@ async def test_git_repo_resolution(tmp_path):
 def test_ws_remove_workflow(tmp_path, monkeypatch, fake_uv):
     (tmp_path/'repos.txt').write_text('AnswerDotAI/keep\n')
     local = tmp_path/'repos-local.txt'
-    local.write_text('AnswerDotAI/repo1\n')
+    local.write_text('AnswerDotAI/repo1\norg/external ../external\n')
     (tmp_path/'pyproject.toml').write_text(WS_META)
     repo = tmp_path/'repo1'
     repo.mkdir()
@@ -268,6 +268,8 @@ def test_ws_remove_workflow(tmp_path, monkeypatch, fake_uv):
     monkeypatch.setattr('builtins.input', lambda *a: answer[0])
 
     with pytest.raises(SystemExit, match='baseline'): core.ws_remove('AnswerDotAI/keep', workspace=str(tmp_path))
+    with pytest.raises(SystemExit, match='location'): core.ws_remove('org/external', workspace=str(tmp_path))
+    assert 'org/external ../external' in local.read_text()
     assert (tmp_path/'repos.txt').read_text() == 'AnswerDotAI/keep\n'
     assert not fake_uv
 

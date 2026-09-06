@@ -1,8 +1,8 @@
 "Fast workspace tools for multi-repo management."
 
-__all__ = ["ws_clone", "ws_pull", "ws_status", "ws_branches", "ws_build", "ws_sync", "ws_add", "ws_remove"]
+__all__ = ["ws_setup", "ws_clone", "ws_pull", "ws_status", "ws_branches", "ws_build", "ws_sync", "ws_add", "ws_remove"]
 
-import ast, fnmatch, hashlib, json, os, re, shutil, subprocess, sys, time
+import ast, fnmatch, hashlib, json, os, re, shlex, shutil, subprocess, sys, time
 from pathlib import Path
 from concurrent.futures import ThreadPoolExecutor
 
@@ -42,8 +42,7 @@ def _load_repo_entries(repos_file, root: Path) -> list[tuple[str, Path]]:
             if key in res and loc is None: continue
             d = _resolve_path(root, Path(loc).expanduser()) if loc else root/_repo_dir(repo)
             resolved = d.resolve()
-            if key in res and res[key][1].resolve() != resolved:
-                raise SystemExit(f'Conflicting checkout locations for {repo} in {p}')
+            if key in res and res[key][1].resolve() != resolved: raise SystemExit(f'Conflicting locations for {repo} in {p}')
             if resolved in locations and locations[resolved] != key:
                 raise SystemExit(f'Checkout location {d} is shared by {repo} and {locations[resolved]}')
             res.setdefault(key, (repo, d))
@@ -76,8 +75,7 @@ def _ws_root(workspace: str = "", repos_file: str = "repos.txt", pyproject_file:
         if not (env := os.environ.get(env_name)): continue
         root = Path(env).expanduser().resolve().parent
         paths = (repos_file, _local_repos_path(repos_file), pyproject_file, template_file)
-        if any(_resolve_path(root, p).exists() for p in paths):
-            return root
+        if any(_resolve_path(root, p).exists() for p in paths): return root
     return Path.cwd().resolve()
 
 def _parse_github_repo(remote: str) -> str|None:
@@ -125,7 +123,7 @@ async def _discover_ws_repos(root: Path) -> list[str]:
     return [r for r in res if r]
 
 def _update_repos_file(repos_path: Path, repos: list[str]) -> list[str]:
-    seen = {_repo_key(repo) for repo,d in _load_repo_entries(repos_path, repos_path.parent)}
+    seen = {_repo_key(repo) for p in (repos_path, _local_repos_path(repos_path)) for repo in _load_repos(p)}
     missing = []
     for repo in repos:
         if (key := _repo_key(_parse_repo_line(repo)[0])) in seen: continue
@@ -185,8 +183,7 @@ def _external_projects(root: Path, dirs: list[Path]) -> list[tuple[str,str]]:
             if name := _read_pyproject_name(c/"pyproject.toml"): res.append((name, os.path.relpath(c, root)))
     return res
 
-def _valid_project_dir(d: Path) -> bool:
-    return (d/"pyproject.toml").exists() and bool(_read_pyproject_name(d/"pyproject.toml"))
+def _valid_project_dir(d: Path) -> bool: return (d/"pyproject.toml").exists() and bool(_read_pyproject_name(d/"pyproject.toml"))
 
 def _cargo_only(d: Path) -> bool:
     "A Rust crate with no Python layer: not a pending scaffold, just not a uv workspace member"
@@ -210,10 +207,10 @@ def _sync_ws_excludes(pyproject_path: Path, root: Path, tracked: set[str]) -> tu
     intent = [e for e in data.get("tool", {}).get("fastws", {}).get("exclude", []) if isinstance(e, str)]
     kept = [e for e in cur if e in intent or any(c in e for c in "*?[") or not (root/e).is_dir() or (e in tracked and not _valid_project_dir(root/e))]
     kept += [e for e in intent if e not in kept]
-    auto = [d.name for d in sorted(root.iterdir())
-            if d.is_dir() and not d.name.startswith(".") and any(_matches_ws(d.name, m) for m in members)
-            and not any(_matches_ws(d.name, e) for e in kept)
-            and (d.name not in tracked or _cargo_only(d)) and not _valid_project_dir(d)]
+    auto = [d.name for d in sorted(root.iterdir())  # chkstyle: ignore-node
+        if d.is_dir() and not d.name.startswith(".") and any(_matches_ws(d.name, m) for m in members)
+        and not any(_matches_ws(d.name, e) for e in kept)
+        and (d.name not in tracked or _cargo_only(d)) and not _valid_project_dir(d)]
     survivors = set(kept) | set(auto)
     new = [e for e in cur if e in survivors] + [e for e in kept + auto if e not in cur]
     if new == cur: return [], []
@@ -224,8 +221,7 @@ def _sync_ws_excludes(pyproject_path: Path, root: Path, tracked: set[str]) -> tu
 
 def _replace_ws_excludes(content: str, excludes: list[str]) -> str:
     block = "exclude = [\n" + "".join(f'    "{e}",\n' for e in excludes) + "]"
-    if not (span := _table_span(content, "tool.uv.workspace")):
-        return content.rstrip() + "\n\n[tool.uv.workspace]\n" + block + "\n"
+    if not (span := _table_span(content, "tool.uv.workspace")): return content.rstrip() + "\n\n[tool.uv.workspace]\n" + block + "\n"
     start,end = span
     section = content[start:end]
     if m := re.search(r"(?m)^exclude\s*=\s*\[", section):
@@ -291,7 +287,7 @@ members = ["./*"]
 ''')
     return True
 
-def _sync_ws_pyproject(pyproject_path: Path, template_path: Path, projects: list[str], externals: list[tuple[str,str]] = None) -> list[str]:
+def _sync_ws_pyproject(pyproject_path: Path, template_path: Path, projects: list[str], externals: list[tuple] = None) -> list[str]:
     if not pyproject_path.exists():
         if template_path.exists(): shutil.copyfile(template_path, pyproject_path)
         else: _init_ws_pyproject(pyproject_path)
@@ -402,6 +398,28 @@ async def _changed_dirs(dirs: list[Path]) -> list[Path]:
     if not known: return dirs
     heads = await _remote_heads([(s, b) for _, (s, b, _) in known])
     return [d for ((d, (_, _, local)), remote) in zip(known, heads) if remote != local] + unknown
+
+@call_parse
+def ws_setup(
+    repo: str,  # Workspace repository: owner/repo or GitHub URL
+    dest: str,  # New workspace directory (must not exist)
+    python: str = "3.13",  # Python version for the workspace environment
+):
+    "Clone a workspace, create its environment, install fastws, and sync without changing the caller's environment."
+    root = Path(dest).expanduser().absolute()
+    if root.exists() or root.is_symlink(): raise SystemExit(f'Destination exists: {root}; use ws-sync for an existing workspace')
+    repo = _normalize_repo(repo)
+    root.parent.mkdir(parents=True, exist_ok=True)
+    Git(root.parent, raise_exc=True).clone(f'git@github.com:{repo}.git', str(root))
+    venv = root/'.venv'
+    bindir = venv/'bin'
+    env = dict(os.environ, VIRTUAL_ENV=str(venv), UV_PROJECT_ENVIRONMENT=str(venv),
+        UV_PROJECT=str(root), UV_WORKING_DIR=str(root), PATH=f'{bindir}{os.pathsep}{os.environ["PATH"]}')
+    subprocess.run(['uv', 'venv', '--python', python, str(venv)], cwd=root, env=env, check=True)
+    subprocess.run(['uv', 'pip', 'install', '--python', str(bindir/'python'), 'fastws-cli>=0.0.14'], cwd=root, env=env, check=True)
+    subprocess.run([str(bindir/'ws-sync'), '--workspace', str(root)], cwd=root, env=env, check=True)
+    print(f'Workspace ready: {root}\n\nsource {shlex.quote(str(bindir/"activate"))}\ncd {shlex.quote(str(root))}')
+    if (root/'aai-coding/SETUP.md').exists(): print('Then ask your coding agent to follow aai-coding/SETUP.md.')
 
 @call_parse
 async def ws_clone(
@@ -758,7 +776,8 @@ async def ws_sync(
     if added_ex: print(f"Auto-excluded from the workspace: {', '.join(added_ex)}")
     if removed_ex: print(f"No longer excluded from the workspace: {', '.join(removed_ex)}")
 
-    if missing_projects := _sync_ws_pyproject(pyproject_path, template_path, _ws_projects(root), _external_projects(root, ext_dirs)): print(f"Added workspace projects: {', '.join(missing_projects)}")
+    missing_projects = _sync_ws_pyproject(pyproject_path, template_path, _ws_projects(root), _external_projects(root, ext_dirs))
+    if missing_projects: print(f"Added workspace projects: {', '.join(missing_projects)}")
 
     wrapper_added = _sync_cargo_wrapper(root)
     added_p, removed_p = _sync_cargo_patches(root)
@@ -867,8 +886,11 @@ def ws_remove(
     repo = _resolve_removal_target(root, repo, repos_path)
     if _repo_key(repo) in {_repo_key(r) for r in _load_repos(repos_path)}:
         raise SystemExit(f'{repo} belongs to the shared baseline: edit {repos_path} deliberately to remove it')
-    repos_path = _local_repos_path(repos_path)
     d = _resolve_repo_dir(root, repo)
+    for r,location in _load_repo_entries(repos_path, root):
+        if _repo_key(r) == _repo_key(repo) and location.resolve() != d:
+            raise SystemExit(f'Refusing to remove {repo}: custom checkout location {location}; manage it explicitly')
+    repos_path = _local_repos_path(repos_path)
     name = _read_pyproject_name(d/"pyproject.toml") if (d/"pyproject.toml").exists() else None
     names = [name] if name else [d.name]
     in_repos = _repo_key(repo) in {_repo_key(r) for r in _load_repos(repos_path)}
