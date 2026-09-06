@@ -1,4 +1,4 @@
-import os, pytest
+import json, os, pytest
 from types import SimpleNamespace
 from fastgit import Git
 import fastws.core as core
@@ -205,6 +205,15 @@ def test_external_projects_discovers_root_and_subdir_packages(tmp_path):
         (multi/name/'pyproject.toml').write_text(f'[project]\nname = "{pkg}"\n')
 
     assert core._external_projects(root, [single, multi, tmp_path/'missing']) == [('singlepkg', '../single'), ('tool1', '../multi/tool1')]
+
+
+@pytest.mark.parametrize('manifest', ['pyproject.toml', 'Cargo.toml', 'package.json'])
+def test_project_dirs_expands_patterns_and_filters_manifests(tmp_path, manifest):
+    for name in ('a', 'b', 'empty'): (tmp_path/'pkgs'/name).mkdir(parents=True)
+    for name in ('a', 'b'): (tmp_path/'pkgs'/name/manifest).write_text('')
+    members, exclude = ['pkgs/*', 'pkgs/a'], ['./pkgs/b']
+    assert core._project_dirs(tmp_path, manifest, members, exclude) == [tmp_path/'pkgs'/'a']
+    assert core._project_dirs(tmp_path, members=members, exclude=exclude) == [tmp_path/'pkgs'/'a', tmp_path/'pkgs'/'empty']
 
 
 def test_ws_projects_skip_excluded_dirs_and_template_names(tmp_path):
@@ -454,3 +463,101 @@ def test_sync_cargo_wrapper(tmp_path, monkeypatch):
     config.write_text('[build]\nrustc-wrapper = "other-cache"\n')
     assert not core._sync_cargo_wrapper(tmp_path)
     assert core.tomllib.loads(config.read_text())['build']['rustc-wrapper'] == 'other-cache'
+
+
+def test_npm_dirs_discovers_root_and_declared_packages(tmp_path):
+    for name in ('app', 'crate', 'crate/wasm', 'crate/frontend', 'crate/docs', '_scratch', 'node_modules', 'crate/node_modules'):
+        d = tmp_path/name
+        d.mkdir(parents=True, exist_ok=True)
+        (d/'package.json').write_text('{}')
+    (tmp_path/'app'/'package-lock.json').write_text('{}')
+    (tmp_path/'crate'/'package.json').write_text('{"private": true, "workspaces": ["wasm", "front*", "node_modules", "wasm", "missing"]}')
+    (tmp_path/'crate'/'frontend'/'bun.lock').write_text('')  # lockfiles do not override explicit membership
+
+    assert core._npm_dirs(tmp_path) == [tmp_path/'app', tmp_path/'crate', tmp_path/'crate'/'wasm', tmp_path/'crate'/'frontend']
+
+
+def test_npm_dirs_honours_fastws_exclude(tmp_path):
+    (tmp_path/'pyproject.toml').write_text('[tool.fastws]\nexclude = ["app", "tool*", "py/examples"]\n')
+    for name in ('app', 'lib', 'tools'):
+        (tmp_path/name).mkdir()
+        (tmp_path/name/'package.json').write_text('{}')
+    for name in ('examples', 'wasm'):
+        (tmp_path/'py'/name).mkdir(parents=True)
+        (tmp_path/'py'/name/'package.json').write_text('{}')  # examples is excluded by its root-relative path
+    (tmp_path/'py'/'package.json').write_text('{"private": true, "workspaces": ["*"]}')
+
+    assert core._npm_dirs(tmp_path) == [tmp_path/'lib', tmp_path/'py', tmp_path/'py'/'wasm']
+
+
+def test_sync_ws_package_json_generates_and_preserves(tmp_path):
+    pkg = tmp_path/'package.json'
+    pkg.write_text('{\n  "name": "ws",\n  "private": true,\n  "workspaces": ["../outside", "gone", "tools/*"]\n}\n')
+    members = [tmp_path/'app', tmp_path/'crate'/'wasm']
+
+    added, removed = core._sync_ws_package_json(tmp_path, members)
+    data = json.loads(pkg.read_text())
+    # kept: entries outside the root and globs; managed: existing dirs regenerated from discovery
+    assert data['workspaces'] == ['../outside', 'tools/*', 'app', 'crate/wasm']
+    assert data['name'] == 'ws' and data['private'] is True  # other keys untouched
+    assert added == ['app', 'crate/wasm'] and removed == ['gone']
+
+    content = pkg.read_text()
+    assert core._sync_ws_package_json(tmp_path, members) == ([], [])
+    assert pkg.read_text() == content
+
+    # a missing root package.json is created
+    bare = tmp_path/'ws2'
+    bare.mkdir()
+    assert core._sync_ws_package_json(bare, [bare/'a']) == (['a'], [])
+    assert json.loads((bare/'package.json').read_text()) == {'private': True, 'workspaces': ['a']}
+
+
+@pytest.mark.parametrize('workspaces', [{'packages': ['packages/*']}, {}])
+def test_sync_ws_package_json_rejects_object_form(tmp_path, workspaces):
+    pkg = tmp_path/'package.json'
+    content = json.dumps({'private': True, 'workspaces': workspaces}) + '\n'
+    pkg.write_text(content)
+
+    with pytest.raises(SystemExit, match='workspaces.*list') as exc: core._sync_ws_package_json(tmp_path, [tmp_path/'app'])
+    assert str(pkg) in str(exc.value)
+    assert pkg.read_text() == content
+
+
+def test_ws_excludes_treat_npm_only_dirs_like_cargo_only(tmp_path):
+    pyproject = tmp_path/'pyproject.toml'
+    pyproject.write_text('[project]\nname = "uvws"\n\n[tool.uv.workspace]\nmembers = ["./*"]\nexclude = []\n')
+    for name in ('app', 'pending'): (tmp_path/name).mkdir()
+    (tmp_path/'app'/'package.json').write_text('{}')
+
+    # a tracked npm-only checkout is a valid JS project: excluded from uv, never pending; an empty tracked dir still awaits scaffolding
+    assert core._sync_ws_excludes(pyproject, tmp_path, {'app', 'pending'}) == (['app'], [])
+    assert core._pending_dirs(tmp_path) == ['pending']
+
+
+@pytest.mark.parametrize('tool', ['npm', 'custom-js'])
+def test_sync_js_installs_then_builds_native_members(tmp_path, monkeypatch, tool):
+    if tool != 'npm': (tmp_path/'pyproject.toml').write_text(f'[tool.fastws]\njs = "{tool}"\n')
+    app = tmp_path/'app'
+    app.mkdir()
+    (app/'package.json').write_text('{"scripts": {"build": "vite build"}}')
+    crate = tmp_path/'crate'
+    wasm = crate/'wasm'
+    (wasm/'pkg').mkdir(parents=True)
+    (wasm/'pkg'/'out.wasm').write_text('')
+    for d in (crate, wasm): (d/'Cargo.toml').write_text('')
+    (crate/'package.json').write_text('{"private": true, "workspaces": ["wasm"]}')
+    (wasm/'package.json').write_text('{"scripts": {"build": "cargo build"}}')
+    calls = []
+    monkeypatch.setattr(core.subprocess, 'run', lambda cmd, **kw: calls.append((cmd, kw.get('cwd'))))
+    members = [app, crate, wasm]
+
+    # a tool that is not installed stops the sync with a one-line message before anything runs
+    monkeypatch.setattr(core.shutil, 'which', lambda t: None)
+    with pytest.raises(SystemExit, match='not installed'): core._sync_js(tmp_path, members)
+    assert calls == []
+    monkeypatch.setattr(core.shutil, 'which', lambda t: f'/usr/bin/{t}')
+
+    # Install first, then run the native build even with existing output.
+    assert core._sync_js(tmp_path, members) == [wasm]
+    assert calls == [([tool, 'install'], tmp_path), ([tool, 'run', 'build'], wasm)]

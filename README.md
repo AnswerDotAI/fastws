@@ -169,7 +169,7 @@ By default, `ws-sync` uses the active venv's parent as the workspace root. It cr
 
 Project scanning respects `tool.uv.workspace.members` and `exclude`. If a member directory lacks `pyproject.toml`, such as a fresh empty clone, sync warns and skips the `uv sync` step.
 
-The workspace `exclude` list is maintained automatically. An unlisted top-level directory that is not a valid Python project is excluded until it has a `pyproject.toml`. A `repos.txt` checkout is automatically excluded only when it is a Cargo-only Rust crate. A listed checkout with neither `pyproject.toml` nor `Cargo.toml` is treated as a pending member and triggers the warning above.
+Fastws maintains `tool.uv.workspace.exclude`. It excludes unlisted top-level directories without a valid Python project. It also excludes listed Rust or JavaScript projects without `pyproject.toml`. For a listed checkout with none of `pyproject.toml`, `Cargo.toml`, or `package.json`, sync warns and skips installation.
 
 Existing globs, entries for missing directories, and entries for checkouts that are still not Python projects are retained. Use `exclude = [...]` under `[tool.fastws]` to specify exclusions the scan cannot infer, such as keeping a valid project out of the workspace. Adding members preserves hand-written `[tool.uv.sources]` entries, including path and Git sources.
 
@@ -178,6 +178,14 @@ Each sync regenerates Cargo overrides in the workspace's `.cargo/config.toml`. `
 Do not commit a `Cargo.lock` generated under these patches. Its source-less local entries cannot be resolved on another machine.
 
 When `sccache` is installed, sync also configures it as Cargo's `rustc-wrapper`, allowing unchanged compilation units to be reused across the workspace's otherwise-independent Cargo target directories. An existing wrapper is always preserved.
+
+Fastws discovers JavaScript packages directly under the workspace root. It reads each package's `workspaces` list for declared nested packages. These lists accept paths and globs. Fastws ignores undeclared nested packages. Lockfiles do not affect discovery. `[tool.fastws].exclude` matches paths relative to the workspace root. Fastws skips `node_modules` and directories whose names start with `.` or `_`.
+
+Each sync updates `workspaces` in the root `package.json`. It creates the file when needed. It preserves external paths, globs, and unrelated settings. It reports added and removed packages.
+
+After `uv sync`, fastws runs `<tool> install` at the workspace root. It then runs `<tool> run build` in each JavaScript package containing both `Cargo.toml` and a `build` script. Cargo handles incremental compilation. Other build steps still run.
+
+The package manager defaults to `npm`. Set `js` under `[tool.fastws]` in the workspace `pyproject.toml` to choose another executable, such as `js = "bun"`. Fastws requires a list for `workspaces` in `package.json`, following the npm format. It stops if it cannot find the selected executable.
 
 At most once per day, sync upgrades dependencies with `uv sync -U` and a parallel `cargo update` in every member with a `Cargo.toml`. It prints the changes and records the run in a stamp file inside the workspace's `.git` directory. Pass `--upgrade` to force an upgrade regardless of the last run time.
 

@@ -10,20 +10,11 @@ from fastcore.parallel import parallel_async
 from ghapi.core import APIError, GhApi, dep_closure, local_dep_graph
 from packaging.version import InvalidVersion, Version
 
-from .core import _load_repo_entries, _resolve_path, _ws_root
-
-try: import tomllib
-except ModuleNotFoundError: import tomli as tomllib
+from .core import _fastws_cfg, _load_repo_entries, _resolve_path, _ws_root
 
 # Start-of-message regexes for commits that need no release (curation noise, CI config, docs regen)
 DEFAULT_SKIP = ["bump$", "Bump version to ", "meta", "auto", "README", "regen readme", "nbdev regen",
     "update .gitignore", r"\.?gitignore$", "workflow", "chkstyle skip", "tests$", "md$", "docs?$", "clean$", "CI$", "ignore$", "allowed_metadata_keys$"]
-
-def _fastws_cfg(root: Path) -> dict:
-    "The `[tool.fastws]` table from the workspace root pyproject.toml (empty when absent)."
-    pyproj = root/"pyproject.toml"
-    if not pyproj.exists(): return {}
-    return tomllib.loads(pyproj.read_text(encoding="utf-8")).get("tool", {}).get("fastws", {})
 
 def _skip_pats(skip=None, root: Path|None = None) -> list[re.Pattern]:
     "Compiled skip patterns: defaults + `[tool.fastws].release_skip` from the workspace pyproject + `skip`."

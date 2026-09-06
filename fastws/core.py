@@ -2,7 +2,7 @@
 
 __all__ = ["ws_setup", "ws_clone", "ws_pull", "ws_status", "ws_branches", "ws_build", "ws_sync", "ws_add", "ws_remove"]
 
-import ast, fnmatch, hashlib, json, os, re, shlex, shutil, subprocess, sys, time
+import ast, fnmatch, glob, hashlib, json, os, re, shlex, shutil, subprocess, sys, time
 from pathlib import Path
 from concurrent.futures import ThreadPoolExecutor
 
@@ -98,16 +98,25 @@ def _ws_cfg(root: Path):
     exclude = ws.get("exclude") or []
     return members, exclude
 
+def _fastws_cfg(root: Path) -> dict:
+    "The `[tool.fastws]` table from the workspace root pyproject.toml (empty when absent)."
+    pyproj = root/"pyproject.toml"
+    if not pyproj.exists(): return {}
+    return tomllib.loads(pyproj.read_text(encoding="utf-8")).get("tool", {}).get("fastws", {})
+
 def _matches_ws(name: str, pattern: str) -> bool:
     pattern = pattern.strip()
     return any(fnmatch.fnmatch(candidate, normalized) for candidate in (name, f"./{name}") for normalized in (pattern, pattern.removeprefix("./")))
 
-def _is_ws_dir(d: Path, members, exclude) -> bool:
-    return d.is_dir() and not d.name.startswith(".") and any(_matches_ws(d.name, o) for o in members) and not any(_matches_ws(d.name, o) for o in exclude)
+def _project_dirs(root: Path, manifest="", members=("*",), exclude=()) -> list[Path]:
+    "Expand member patterns into unique directories, optionally requiring a manifest; exclusions are relative to root."
+    dirs = dict.fromkeys(d for pat in members for d in sorted(root.glob(pat)))
+    return [d for d in dirs if d.is_dir() and (not manifest or (d/manifest).is_file())
+        and not any(_matches_ws(os.path.relpath(d, root), e) for e in exclude)]
 
 def _ws_dirs(root: Path) -> list[Path]:
     members, exclude = _ws_cfg(root)
-    return [d for d in sorted(root.iterdir()) if _is_ws_dir(d, members, exclude)]
+    return [d for d in _project_dirs(root, exclude=exclude) if not d.name.startswith(".") and any(_matches_ws(d.name, o) for o in members)]
 
 def _root_git_dirs(root: Path) -> list[Path]:
     "Every git checkout directly under `root`, whatever the uv workspace config; `_`-prefixed dirs are private"
@@ -178,16 +187,20 @@ def _external_projects(root: Path, dirs: list[Path]) -> list[tuple[str,str]]:
     res = []
     for d in dirs:
         if not d.is_dir(): continue
-        cands = [d] if (d/"pyproject.toml").exists() else sorted(p for p in d.iterdir() if p.is_dir() and not p.name.startswith((".","_")) and (p/"pyproject.toml").exists())
+        cands = [d] if (d/"pyproject.toml").exists() else [p for p in _project_dirs(d, "pyproject.toml") if not p.name.startswith((".", "_"))]
         for c in cands:
             if name := _read_pyproject_name(c/"pyproject.toml"): res.append((name, os.path.relpath(c, root)))
     return res
 
 def _valid_project_dir(d: Path) -> bool: return (d/"pyproject.toml").exists() and bool(_read_pyproject_name(d/"pyproject.toml"))
 
-def _cargo_only(d: Path) -> bool:
-    "A Rust crate with no Python layer: not a pending scaffold, just not a uv workspace member"
-    return (d/"Cargo.toml").exists() and not (d/"pyproject.toml").exists()
+def _non_python_project(d: Path) -> bool:
+    "A Rust or JS project without a Python layer is not a pending Python scaffold."
+    return not (d/"pyproject.toml").exists() and any((d/f).exists() for f in ("Cargo.toml", "package.json"))
+
+def _pending_dirs(root: Path) -> list[str]:
+    "uv workspace dirs that are not Python projects yet; sync stops rather than let uv fail on them"
+    return [d.name for d in _ws_dirs(root) if not (d/"pyproject.toml").exists()]
 
 def _sync_ws_excludes(pyproject_path: Path, root: Path, tracked: set[str]) -> tuple[list[str], list[str]]:
     """Regenerate `tool.uv.workspace.exclude` and return (added, removed).
@@ -195,7 +208,7 @@ def _sync_ws_excludes(pyproject_path: Path, root: Path, tracked: set[str]) -> tu
     Kept as-is: `[tool.fastws].exclude` entries (intent), globs, missing dirs, and tracked dirs
     (repos.txt checkouts) that are still not valid Python projects. Auto-managed: entries for other
     existing dirs are regenerated each sync, excluding dirs without a valid pyproject (tracked dirs
-    only when they are Cargo-only crates, since a tracked dir with neither file is a pending member
+    only when they are Cargo-only crates or npm-only packages, since a tracked dir with none of those files is a pending member
     awaiting scaffolding) and un-excluding dirs that gained one; deliberately excluding a real
     project takes a `[tool.fastws]` entry."""
     if not pyproject_path.exists(): return [], []
@@ -207,10 +220,8 @@ def _sync_ws_excludes(pyproject_path: Path, root: Path, tracked: set[str]) -> tu
     intent = [e for e in data.get("tool", {}).get("fastws", {}).get("exclude", []) if isinstance(e, str)]
     kept = [e for e in cur if e in intent or any(c in e for c in "*?[") or not (root/e).is_dir() or (e in tracked and not _valid_project_dir(root/e))]
     kept += [e for e in intent if e not in kept]
-    auto = [d.name for d in sorted(root.iterdir())  # chkstyle: ignore-node
-        if d.is_dir() and not d.name.startswith(".") and any(_matches_ws(d.name, m) for m in members)
-        and not any(_matches_ws(d.name, e) for e in kept)
-        and (d.name not in tracked or _cargo_only(d)) and not _valid_project_dir(d)]
+    auto = [d.name for d in _project_dirs(root, exclude=kept) if not d.name.startswith(".") and any(_matches_ws(d.name, m) for m in members)
+        and (d.name not in tracked or _non_python_project(d)) and not _valid_project_dir(d)]
     survivors = set(kept) | set(auto)
     new = [e for e in cur if e in survivors] + [e for e in kept + auto if e not in cur]
     if new == cur: return [], []
@@ -569,7 +580,7 @@ _CARGO_KEY = Path(".git/fastws-cargo-key")
 
 def _crate_dirs(root: Path) -> list[Path]:
     "Root dirs containing a Cargo.toml: the crate view of the workspace, independent of uv membership"
-    return [d for d in sorted(root.iterdir()) if d.is_dir() and not d.name.startswith((".", "_")) and (d/"Cargo.toml").exists()]
+    return [d for d in _project_dirs(root, "Cargo.toml") if not d.name.startswith((".", "_"))]
 
 def _cargo_patches(root: Path):
     "Local Cargo patches keyed by normalized Git URL and package name, plus their config file."
@@ -589,12 +600,10 @@ def _crate_pkgs(d: Path):
     try: data = tomllib.loads((d/"Cargo.toml").read_text())
     except tomllib.TOMLDecodeError: return
     if name := data.get("package", {}).get("name"): yield name, d
-    for pat in data.get("workspace", {}).get("members", []):
-        for m in sorted(d.glob(pat)):
-            if not (m/"Cargo.toml").exists(): continue
-            try: sub = tomllib.loads((m/"Cargo.toml").read_text())
-            except tomllib.TOMLDecodeError: continue
-            if name := sub.get("package", {}).get("name"): yield name, m
+    for m in _project_dirs(d, "Cargo.toml", data.get("workspace", {}).get("members", [])):
+        try: sub = tomllib.loads((m/"Cargo.toml").read_text())
+        except tomllib.TOMLDecodeError: continue
+        if name := sub.get("package", {}).get("name"): yield name, m
 
 def _local_crates(root: Path) -> dict[str, Path]:
     "Package name -> dir for every crate under `root`, nested cargo workspace members included"
@@ -622,6 +631,10 @@ def _strip_patch_tables(content: str) -> str:
         end = nl+1+nxt.start() if nxt else len(content)
         content = content[:m.start()] + content[end:]
     return content
+
+def _entry_changes(current, new):
+    "Added and removed keys, in the order supplied."
+    return [k for k in new if k not in current], [k for k in current if k not in new]
 
 def _sync_cargo_patches(root: Path) -> tuple[list[str], list[str]]:
     """Regenerate `[patch]` entries in the workspace `.cargo/config.toml` and return (added, removed).
@@ -659,7 +672,8 @@ def _sync_cargo_patches(root: Path) -> tuple[list[str], list[str]]:
     config.write_text(new)
     before = {n for entries in old.values() for n in entries}
     after = {n for entries in tables.values() for n in entries}
-    return sorted(after - before), sorted(before - after)
+    added, removed = _entry_changes(before, after)
+    return sorted(added), sorted(removed)
 
 def _sync_cargo_wrapper(root: Path) -> bool:
     "Add sccache to the generated Cargo config when installed, without overriding another wrapper"
@@ -744,6 +758,41 @@ def _cargo_update(root: Path, workers: int = 16):
             elif lines := [l for l in out.splitlines() if l.lstrip().startswith(("Updating ", "Adding ", "Removing ")) and "crates.io index" not in l]:
                 print(f"{name}:\n" + "\n".join(lines))
 
+def _npm_dirs(root: Path) -> list[Path]:
+    "Find root JavaScript packages and their declared workspace members."
+    exclude = _fastws_cfg(root).get("exclude", [])
+    def ok(d): return not d.name.startswith((".", "_")) and d.name != "node_modules"
+    res = []
+    for d in _project_dirs(root, "package.json", exclude=exclude):
+        if not ok(d): continue
+        data = json.loads((d/"package.json").read_text())
+        members = [glob.escape(d.name)] + [f"{glob.escape(d.name)}/{p}" for p in data.get("workspaces", [])]
+        res += _project_dirs(root, "package.json", members, exclude)
+    return list(dict.fromkeys(d for d in res if ok(d)))
+
+def _sync_ws_package_json(root: Path, members: list[Path]) -> tuple[list[str], list[str]]:
+    "Update package.json workspaces, preserving external paths and globs; return (added, removed)."
+    path = root/"package.json"
+    data = json.loads(path.read_text()) if path.exists() else {"private": True}
+    cur = data.get("workspaces", [])
+    if not isinstance(cur, list): raise SystemExit(f"{path}: fastws requires `workspaces` to be a list of package paths.")
+    kept = [e for e in cur if any(c in e for c in "*?[") or not (root/e).resolve().is_relative_to(root.resolve())]
+    new = kept + [e for e in (os.path.relpath(d, root) for d in members) if e not in kept]
+    if new == cur: return [], []
+    data["workspaces"] = new
+    path.write_text(json.dumps(data, indent=2) + "\n")
+    return _entry_changes(cur, new)
+
+def _sync_js(root: Path, members: list[Path]) -> list[Path]:
+    "Install the JS workspace, run every native member's build script, and return those members. Cargo handles incremental compilation."
+    tool = _fastws_cfg(root).get("js", "npm")
+    if not shutil.which(tool): raise SystemExit(f"{tool} is not installed: install it, or set [tool.fastws].js to a package manager that is")
+    subprocess.run([tool, "install"], check=True, cwd=root)
+    built = [d for d in members if (d/"Cargo.toml").exists()
+        and json.loads((d/"package.json").read_text()).get("scripts", {}).get("build")]
+    for d in built: subprocess.run([tool, "run", "build"], check=True, cwd=d)
+    return built
+
 @call_parse
 async def ws_sync(
     workspace: str = "",  # Workspace root; defaults to active venv parent when available
@@ -785,7 +834,12 @@ async def ws_sync(
     if removed_p: print(f"Cargo patches removed: {', '.join(removed_p)}")
     if wrapper_added: print("Cargo builds now use sccache")
 
-    if bad := [d.name for d in _ws_dirs(root) if not (d/"pyproject.toml").exists()]:
+    js_members = _npm_dirs(root)
+    added_j, removed_j = _sync_ws_package_json(root, js_members)
+    if added_j: print(f"JS workspace packages added: {', '.join(added_j)}")
+    if removed_j: print(f"JS workspace packages removed: {', '.join(removed_j)}")
+
+    if bad := _pending_dirs(root):
         print(f"⚠️  Skipping uv sync, not Python projects yet (scaffold with e.g. nbdev-new or ship-new, or remove): {', '.join(bad)}")
         return
     up = upgrade or _should_upgrade(root)
@@ -793,6 +847,7 @@ async def ws_sync(
     _sync_cargo_keys(root)
     subprocess.run(["uv", "sync", "-U"] if up else ["uv", "sync"], check=True, cwd=root)
     if up: _upgrade_stamp(root).touch()
+    if js_members and (built := _sync_js(root, js_members)): print(f"JS build scripts run: {', '.join(os.path.relpath(d, root) for d in built)}")
 
 @call_parse
 async def ws_add(
