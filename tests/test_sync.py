@@ -561,3 +561,36 @@ def test_sync_js_installs_then_builds_native_members(tmp_path, monkeypatch, tool
     # Install first, then run the native build even with existing output.
     assert core._sync_js(tmp_path, members) == [wasm]
     assert calls == [([tool, 'install'], tmp_path), ([tool, 'run', 'build'], wasm)]
+
+
+def test_check_rustup_missing(monkeypatch):
+    monkeypatch.setattr(core.shutil, 'which', lambda tool: None)
+    with pytest.raises(SystemExit, match='Install it from https://rustup.rs'): core._check_rustup()
+
+
+@pytest.mark.parametrize('shadowed', [None, 'rustc', 'cargo'])
+def test_check_rustup_proxies(tmp_path, monkeypatch, shadowed):
+    rustup = tmp_path/'rustup'
+    rustup.touch()
+    (tmp_path/'rustc').symlink_to(rustup)
+    (tmp_path/'cargo').hardlink_to(rustup)
+    other = tmp_path/'brew-rust'
+    other.touch()
+    monkeypatch.setattr(core.shutil, 'which', lambda tool: str(other if tool == shadowed else tmp_path/tool))
+    if shadowed:
+        with pytest.raises(SystemExit, match=f'{shadowed} resolves to') as err: core._check_rustup()
+        assert 'Homebrew Rust can remain installed' in str(err.value)
+        assert 'PATH' in str(err.value)
+    else: core._check_rustup()
+
+
+async def test_sync_checks_rustup_before_installs(tmp_path, monkeypatch, fake_uv):
+    (tmp_path/'repos.txt').write_text('')
+    (tmp_path/'pyproject.toml').write_text('[project]\nname = "ws"\n[tool.uv.workspace]\nmembers = ["*"]\n')
+    wasm = tmp_path/'wasm'
+    wasm.mkdir()
+    (wasm/'Cargo.toml').write_text('[package]\nname = "wasm"\n')
+    (wasm/'package.json').write_text('{"name": "wasm", "scripts": {"build": "wasm-pack build"}}')
+    monkeypatch.setattr(core.shutil, 'which', lambda tool: None)
+    with pytest.raises(SystemExit, match='require rustup'): await core.ws_sync(str(tmp_path))
+    assert not fake_uv
