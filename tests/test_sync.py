@@ -441,6 +441,17 @@ def test_sync_ws_package_json_generates_and_preserves(tmp_path):
     assert json.loads((bare/'package.json').read_text()) == {'private': True, 'workspaces': ['a']}
 
 
+@pytest.mark.parametrize('workspaces', [{'packages': ['packages/*']}, {}])
+def test_sync_ws_package_json_rejects_object_form(tmp_path, workspaces):
+    pkg = tmp_path/'package.json'
+    content = json.dumps({'private': True, 'workspaces': workspaces}) + '\n'
+    pkg.write_text(content)
+
+    with pytest.raises(SystemExit, match='workspaces.*list') as exc: core._sync_ws_package_json(tmp_path, [tmp_path/'app'])
+    assert str(pkg) in str(exc.value)
+    assert pkg.read_text() == content
+
+
 def test_ws_excludes_treat_npm_only_dirs_like_cargo_only(tmp_path):
     pyproject = tmp_path/'pyproject.toml'
     pyproject.write_text('[project]\nname = "uvws"\n\n[tool.uv.workspace]\nmembers = ["./*"]\nexclude = []\n')

@@ -730,7 +730,8 @@ def _sync_ws_package_json(root: Path, members: list[Path]) -> tuple[list[str], l
     Only the list form of `workspaces` is managed; the object form (`{"packages": [...]}`) is not supported."""
     path = root/"package.json"
     data = json.loads(path.read_text()) if path.exists() else {"private": True}
-    cur = list(data.get("workspaces") or [])
+    cur = data.get("workspaces", [])
+    if not isinstance(cur, list): raise SystemExit(f"{path}: fastws requires `workspaces` to be a list of package paths.")
     kept = [e for e in cur if any(c in e for c in "*?[") or not (root/e).resolve().is_relative_to(root.resolve())]
     new = kept + [e for e in (os.path.relpath(d, root) for d in members) if e not in kept]
     if new == cur: return [], []
