@@ -107,7 +107,10 @@ Progress goes to stderr; on success the dists path prints to stdout, so `$(ws-bu
 ws-build
 ws-build --force  # rebuild everything
 ws-build --out /tmp/dists
+ws-build --project solveit  # only this package and its transitive workspace dependencies
 ```
+
+`--project` selects by package name and follows declared runtime and build dependencies, including workspace packages in external checkouts. Other packages in the output directory are left untouched. Without it, the whole workspace is built as before.
 
 ### `ws-sync`
 

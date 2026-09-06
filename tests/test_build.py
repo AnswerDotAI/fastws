@@ -52,3 +52,19 @@ def test_ws_build_incremental(tmp_path, capsys):
     with pytest.raises(SystemExit): core.ws_build(str(tmp_path))
     assert not list(out.glob("projc*"))
     assert sorted(p.name for p in out.glob("*.tar.gz")) == ["proj_a-0.2.0.tar.gz", "projb-0.1.0.tar.gz"]
+
+
+def test_build_dependency_selection(tmp_path):
+    root = tmp_path/'ws'
+    root.mkdir()
+    app = _mk_proj(root, 'app')
+    lib = _mk_proj(root, 'my-lib')
+    external = _mk_proj(tmp_path, 'external')
+    _mk_proj(root, 'unrelated')
+    (root/'repos.txt').write_text(f'owner/external {external}\n')
+    (app/'pyproject.toml').write_text('[project]\nname="app"\ndependencies=["My.Lib>=1"]\n')
+    (lib/'pyproject.toml').write_text('[project]\nname="my-lib"\n[build-system]\nrequires=["external"]\n')
+    (external/'pyproject.toml').write_text('[project]\nname="external"\ndependencies=["app", "published-only"]\n')
+    assert {n for n,d in core._build_projects(root, 'repos.txt', 'APP')} == {'app', 'my-lib', 'external'}
+    assert len(core._build_projects(root, 'repos.txt')) == 4
+    with pytest.raises(SystemExit, match='No workspace project'): core._build_projects(root, 'repos.txt', 'missing')

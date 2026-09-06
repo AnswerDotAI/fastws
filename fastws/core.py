@@ -9,7 +9,7 @@ from concurrent.futures import ThreadPoolExecutor
 from fastcore.parallel import parallel_async_gen
 from fastcore.script import call_parse
 from fastgit import Git
-from ghapi.core import dep_key
+from ghapi.core import dep_key, dep_closure
 
 try: import tomllib
 except ModuleNotFoundError: import tomli as tomllib
@@ -455,13 +455,23 @@ def _sdists_by_pkg(out: Path) -> dict[str, list[Path]]:
     for p in out.glob("*.tar.gz"): res.setdefault(_dist_name(p.name.removesuffix(".tar.gz").rsplit("-", 1)[0]), []).append(p)
     return res
 
-def _build_projects(root: Path, repos_file: str) -> list[tuple[str, Path]]:
+def _build_projects(root: Path, repos_file: str, project: str = None) -> list[tuple[str, Path]]:
     "(name, dir) for every project ws-sync installs: workspace members plus external checkouts"
     repos_path = _resolve_path(root, repos_file)
     entries = _load_repo_entries(repos_path, root) if repos_path.exists() else []
     ext_dirs = [d for _,d in entries if d.resolve().parent != root.resolve()]
     res = [(name, d) for d in _ws_dirs(root) if (d/"pyproject.toml").exists() and (name := _read_pyproject_name(d/"pyproject.toml"))]
-    return res + [(n, _resolve_path(root, p)) for n,p in _external_projects(root, ext_dirs)]
+    res += [(n, _resolve_path(root, p)) for n,p in _external_projects(root, ext_dirs)]
+    if project is None: return res
+    graph = {}
+    for name, d in res:
+        data = tomllib.loads((d/'pyproject.toml').read_text())
+        deps = data.get('project', {}).get('dependencies', []) + data.get('build-system', {}).get('requires', [])
+        graph[_dist_name(name)] = (d, [_dist_name(dep_key(dep)) for dep in deps])
+    key = _dist_name(project)
+    if key not in graph: raise SystemExit(f'No workspace project named {project}')
+    dirs = dep_closure(key, graph)
+    return [(n,d) for n,d in res if d in dirs]
 
 @call_parse
 def ws_build(
@@ -470,12 +480,13 @@ def ws_build(
     repos_file: str = "repos.txt",  # Repo list, for checkouts outside the workspace root
     force: bool = False,  # Rebuild every project, ignoring existing sdists
     workers: int = 16,  # Number of parallel workers
+    project: str = None,  # Build only this package and its transitive workspace dependencies
 ):
     "Build an sdist of each workspace project into `out`, skipping projects unchanged since their last build; superseded versions are pruned. Progress goes to stderr; on success the dists path prints to stdout; exits 1 if any build fails."
     root = _ws_root(workspace, repos_file)
     out_path = _resolve_path(root, out)
     out_path.mkdir(parents=True, exist_ok=True)
-    projs = _build_projects(root, repos_file)
+    projs = _build_projects(root, repos_file, project)
     existing = _sdists_by_pkg(out_path)
     def _stale(name, d):
         cur = existing.get(_dist_name(name))
