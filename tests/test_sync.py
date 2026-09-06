@@ -48,15 +48,85 @@ def test_repos_file_roundtrip(tmp_path):
         ('jph00/private', core.Path('~/private').expanduser()),
         ('fastai/fastai', tmp_path/'sub'/'dir')]
 
-    # update appends only genuinely-new specs: case differences and location-carrying lines both count as present
+    # discovery and ws-add write only extras, never change the shared baseline
+    original = repos_path.read_text()
+    local = tmp_path/'repos-local.txt'
     added = core._update_repos_file(repos_path, ['answerdotai/fastws', 'jph00/private', 'fastai/new'])
     assert added == ['fastai/new']
-    assert repos_path.read_text().endswith('fastai/new\n')
+    assert local.read_text() == 'fastai/new\n'
+    assert repos_path.read_text() == original
+    assert core._load_repo_entries(repos_path, tmp_path)[-1] == ('fastai/new', tmp_path/'new')
 
     # remove matches case-insensitively, preserves other lines (including comments), and reports absence
-    assert core._remove_from_repos_file(repos_path, 'FASTAI/new') is True
+    assert core._remove_from_repos_file(local, 'FASTAI/new') is True
     assert core._remove_from_repos_file(repos_path, 'AnswerDotAI/gone') is False
     assert repos_path.read_text() == '# header\nAnswerDotAI/fastws\njph00/private ~/private\nfastai/fastai sub/dir\n'
+
+
+def test_repo_lists_deduplicate_and_reject_conflicting_locations(tmp_path):
+    base, local = tmp_path/'repos.txt', tmp_path/'repos-local.txt'
+    base.write_text('org/core\n')
+    local.write_text('ORG/core\norg/extra ../external\n')
+    assert core._load_repo_entries(base, tmp_path) == [('org/core', tmp_path/'core'), ('org/extra', tmp_path/'../external')]
+    local.write_text('org/core ../elsewhere\n')
+    with pytest.raises(SystemExit, match='location'): core._load_repo_entries(base, tmp_path)
+    local.write_text('different/core\n')
+    with pytest.raises(SystemExit, match='location'): core._load_repo_entries(base, tmp_path)
+    base.unlink()
+    assert core._load_repo_entries(base, tmp_path) == [('different/core', tmp_path/'core')]
+
+
+async def test_sync_updates_baseline_before_cloning_and_keeps_removed_repos(tmp_path, monkeypatch, fake_uv):
+    origins, seed, root = tmp_path/'origins', tmp_path/'seed', tmp_path/'ws'
+    config = tmp_path/'gitconfig'
+    config.write_text(f'[init]\ndefaultBranch = main\n[url "{origins.as_uri()}/"]\ninsteadOf = git@github.com:org/\n')
+    monkeypatch.setenv('GIT_CONFIG_GLOBAL', str(config))
+    monkeypatch.setattr(core, '_parse_github_repo', lambda url: f'org/{core.Path(url).stem}' if str(origins) in url else None)
+    async def offline_heads(refs): raise ValueError('No GitHub API in local Git test')
+    monkeypatch.setattr(core, '_remote_heads', offline_heads)
+    for name in ('old', 'new', 'extra'):
+        d = tmp_path/name
+        d.mkdir()
+        (d/'pyproject.toml').write_text(f'[project]\nname = "{name}"\n')
+        mk_repo(d, origin=origins/f'{name}.git')
+    seed.mkdir()
+    (seed/'repos.txt').write_text('org/old\n')
+    (seed/'.gitignore').write_text('*/\npyproject.toml\nrepos-local.txt\n')
+    (seed/'pyproject.tmpl').write_text('[project]\nname = "workspace"\ndependencies = []\n[tool.uv.workspace]\nmembers = ["./*"]\n')
+    g = mk_repo(seed, origin=origins/'workspace.git')
+    Git(tmp_path, raise_exc=True).clone(str(origins/'workspace.git'), str(root))
+    Git(root, raise_exc=True).clone('git@github.com:org/extra.git', str(root/'extra'))
+
+    await core.ws_sync(str(root))
+    assert (root/'old'/'pyproject.toml').exists()
+    assert (root/'repos.txt').read_text() == 'org/old\n'
+    assert (root/'repos-local.txt').read_text() == 'org/extra\n'
+    assert set(core.tomllib.loads((root/'pyproject.toml').read_text())['project']['dependencies']) == {'old', 'extra'}
+
+    (seed/'repos.txt').write_text('org/new\n')
+    g.commit('-a', m='new shared baseline')
+    g.push()
+    await core.ws_sync(str(root))
+    assert (root/'new'/'pyproject.toml').exists()
+    assert (root/'old'/'pyproject.toml').exists()
+    assert (root/'repos.txt').read_text() == 'org/new\n'
+    assert set(core._load_repos(root/'repos-local.txt')) == {'org/extra', 'org/old'}
+    assert set(core.tomllib.loads((root/'pyproject.toml').read_text())['project']['dependencies']) == {'old', 'new', 'extra'}
+
+    (seed/'repos.txt').write_text('org/missing\n')
+    g.commit('-a', m='unavailable member')
+    g.push()
+    fake_uv.clear()
+    with pytest.raises(SystemExit, match='clone'): await core.ws_sync(str(root))
+    assert not fake_uv
+
+    (root/'repos.txt').write_text('local edits\n')
+    (seed/'repos.txt').write_text('org/new\n')
+    g.commit('-a', m='restore baseline')
+    g.push()
+    with pytest.raises(core.subprocess.CalledProcessError): await core.ws_sync(str(root))
+    assert (root/'repos.txt').read_text() == 'local edits\n'
+    assert not fake_uv
 
 
 def test_ws_pyproject_from_template_adds_projects(tmp_path):
@@ -186,7 +256,9 @@ async def test_git_repo_resolution(tmp_path):
 
 
 def test_ws_remove_workflow(tmp_path, monkeypatch, fake_uv):
-    (tmp_path/'repos.txt').write_text('AnswerDotAI/keep\nAnswerDotAI/repo1\n')
+    (tmp_path/'repos.txt').write_text('AnswerDotAI/keep\n')
+    local = tmp_path/'repos-local.txt'
+    local.write_text('AnswerDotAI/repo1\n')
     (tmp_path/'pyproject.toml').write_text(WS_META)
     repo = tmp_path/'repo1'
     repo.mkdir()
@@ -195,10 +267,14 @@ def test_ws_remove_workflow(tmp_path, monkeypatch, fake_uv):
     answer = ['y']
     monkeypatch.setattr('builtins.input', lambda *a: answer[0])
 
+    with pytest.raises(SystemExit, match='baseline'): core.ws_remove('AnswerDotAI/keep', workspace=str(tmp_path))
+    assert (tmp_path/'repos.txt').read_text() == 'AnswerDotAI/keep\n'
+    assert not fake_uv
+
     # a dirty tree refuses before any mutation
     (repo/'pyproject.toml').write_text('[project]\nname = "repo1pkg"\nversion = "1"\n')
     with pytest.raises(SystemExit): core.ws_remove('AnswerDotAI/repo1', workspace=str(tmp_path))
-    assert repo.exists() and 'repo1' in (tmp_path/'repos.txt').read_text()
+    assert repo.exists() and 'repo1' in local.read_text()
 
     # so does an unpushed commit on a clean tree
     g.commit('-a', m='ahead')
@@ -210,12 +286,12 @@ def test_ws_remove_workflow(tmp_path, monkeypatch, fake_uv):
     answer[0] = 'n'
     core.ws_remove('AnswerDotAI/repo1', workspace=str(tmp_path))
     assert repo.exists()
-    assert 'repo1' not in (tmp_path/'repos.txt').read_text()
+    assert 'repo1' not in local.read_text()
     assert 'repo1pkg' not in (tmp_path/'pyproject.toml').read_text()
     assert ['uv', 'sync'] in fake_uv
 
     # answering 'y' (by folder name this time) also deletes the checkout
-    (tmp_path/'repos.txt').write_text('AnswerDotAI/keep\nAnswerDotAI/repo1\n')
+    local.write_text('AnswerDotAI/repo1\n')
     (tmp_path/'pyproject.toml').write_text(WS_META)
     answer[0] = 'y'
     core.ws_remove('repo1', workspace=str(tmp_path))

@@ -56,7 +56,8 @@ def _member(tmp_path, dirname, pkg=None, deps=()):
 
 
 def test_check_releases_scoping(tmp_path, monkeypatch):
-    (tmp_path/"repos.txt").write_text("AnswerDotAI/libx\nAnswerDotAI/appy\nAnswerDotAI/exty\n", encoding="utf-8")
+    (tmp_path/"repos.txt").write_text("AnswerDotAI/libx\nAnswerDotAI/appy\n", encoding="utf-8")
+    (tmp_path/"repos-local.txt").write_text("AnswerDotAI/exty\n", encoding="utf-8")
     _member(tmp_path, "libx", pkg="libx-cli")
     _member(tmp_path, "appy", deps=["libx-cli"])
     _member(tmp_path, "exty")

@@ -61,7 +61,7 @@ def test_build_dependency_selection(tmp_path):
     lib = _mk_proj(root, 'my-lib')
     external = _mk_proj(tmp_path, 'external')
     _mk_proj(root, 'unrelated')
-    (root/'repos.txt').write_text(f'owner/external {external}\n')
+    (root/'repos-local.txt').write_text(f'owner/external {external}\n')
     (app/'pyproject.toml').write_text('[project]\nname="app"\ndependencies=["My.Lib>=1"]\n')
     (lib/'pyproject.toml').write_text('[project]\nname="my-lib"\n[build-system]\nrequires=["external"]\n')
     (external/'pyproject.toml').write_text('[project]\nname="external"\ndependencies=["app", "published-only"]\n')
