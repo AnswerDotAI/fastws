@@ -783,13 +783,30 @@ def _sync_ws_package_json(root: Path, members: list[Path]) -> tuple[list[str], l
     path.write_text(json.dumps(data, indent=2) + "\n")
     return _entry_changes(cur, new)
 
+def _native_js(members: list[Path]) -> list[Path]:
+    "JavaScript packages with a Rust manifest and a build script."
+    return [d for d in members if (d/"Cargo.toml").exists()
+        and json.loads((d/"package.json").read_text()).get("scripts", {}).get("build")]
+
+def _check_rustup():
+    "Require rustup's compiler proxies for automatic WASM target installation."
+    if not (rustup := shutil.which("rustup")):
+        raise SystemExit("Rust-backed JavaScript builds require rustup. Install it from https://rustup.rs, "
+            "select a stable toolchain with `rustup default stable`, then reopen your shell and rerun ws-sync.")
+    for tool in "rustc","cargo":
+        path = shutil.which(tool)
+        if path and os.path.samefile(path, rustup): continue
+        raise SystemExit(f"Rust-backed JavaScript builds require rustup-managed Rust, but {tool} resolves to {path or 'nothing'}. "
+            "Put rustup's bin directory first on PATH after Homebrew or other toolchain setup in your shell profile "
+            '(normally: export PATH="$HOME/.cargo/bin:$PATH"; use $CARGO_HOME/bin when customized). '
+            "Homebrew Rust can remain installed. Open a new shell and rerun ws-sync.")
+
 def _sync_js(root: Path, members: list[Path]) -> list[Path]:
     "Install the JS workspace, run every native member's build script, and return those members. Cargo handles incremental compilation."
     tool = _fastws_cfg(root).get("js", "npm")
     if not shutil.which(tool): raise SystemExit(f"{tool} is not installed: install it, or set [tool.fastws].js to a package manager that is")
     subprocess.run([tool, "install"], check=True, cwd=root)
-    built = [d for d in members if (d/"Cargo.toml").exists()
-        and json.loads((d/"package.json").read_text()).get("scripts", {}).get("build")]
+    built = _native_js(members)
     for d in built: subprocess.run([tool, "run", "build"], check=True, cwd=d)
     return built
 
@@ -835,6 +852,7 @@ async def ws_sync(
     if wrapper_added: print("Cargo builds now use sccache")
 
     js_members = _npm_dirs(root)
+    if _native_js(js_members): _check_rustup()
     added_j, removed_j = _sync_ws_package_json(root, js_members)
     if added_j: print(f"JS workspace packages added: {', '.join(added_j)}")
     if removed_j: print(f"JS workspace packages removed: {', '.join(removed_j)}")
