@@ -632,12 +632,6 @@ def _strip_patch_tables(content: str) -> str:
         content = content[:m.start()] + content[end:]
     return content
 
-def _merge_entries(current, desired, keep):
-    "Replace managed entries, preserving overrides selected by keep(key, value)."
-    res = {k:v for k,v in current.items() if keep(k,v)}
-    for k,v in desired.items(): res.setdefault(k,v)
-    return res
-
 def _entry_changes(current, new):
     "Added and removed keys, in the order supplied."
     return [k for k in new if k not in current], [k for k in current if k not in new]
@@ -652,16 +646,21 @@ def _sync_cargo_patches(root: Path) -> tuple[list[str], list[str]]:
     one of the same name."""
     root = root.resolve()
     crates = _local_crates(root)
-    desired = {"crates-io": {name: {"path": str(d)} for name, d in crates.items()}}
-    for url, entries in _git_dep_tables(root, crates).items(): desired[url] = {name: {"path": str(d)} for name, d in entries.items()}
+    desired = {"crates-io": {name: str(d) for name, d in crates.items()}}
+    for url, entries in _git_dep_tables(root, crates).items(): desired[url] = {name: str(d) for name, d in entries.items()}
     config = root/".cargo"/"config.toml"
     content = config.read_text() if config.exists() else ""
     old = tomllib.loads(content).get("patch", {}) if content else {}
-    def keep(_, spec):
-        if not isinstance(spec, dict) or not (p := spec.get("path")): return True
+    def inside(spec):
+        if not isinstance(spec, dict) or not (p := spec.get("path")): return False
         p = Path(p).expanduser()
-        return not (p if p.is_absolute() else config.parent/p).resolve().is_relative_to(root)
-    tables = {url: _merge_entries(old.get(url, {}), desired.get(url, {}), keep) for url in old | desired}
+        return (p if p.is_absolute() else config.parent/p).resolve().is_relative_to(root)
+    tables = {}
+    for url, entries in old.items():
+        if foreign := {n: s for n, s in entries.items() if not inside(s)}: tables[url] = foreign
+    for url, entries in desired.items():
+        cur = tables.setdefault(url, {})
+        for name, path in entries.items(): cur.setdefault(name, {"path": path})
     body = "\n".join(
         (f"[patch.{url}]" if url == "crates-io" else f'[patch."{url}"]') + "\n"
         + "".join(f"{name} = {_fmt_source(spec)}\n" for name, spec in sorted(entries.items()))
@@ -785,9 +784,8 @@ def _sync_ws_package_json(root: Path, members: list[Path]) -> tuple[list[str], l
     data = json.loads(path.read_text()) if path.exists() else {"private": True}
     cur = data.get("workspaces", [])
     if not isinstance(cur, list): raise SystemExit(f"{path}: fastws requires `workspaces` to be a list of package paths.")
-    def keep(e, _): return any(c in e for c in "*?[") or not (root/e).resolve().is_relative_to(root.resolve())
-    desired = dict.fromkeys(os.path.relpath(d, root) for d in members)
-    new = list(_merge_entries(dict.fromkeys(cur), desired, keep))
+    kept = [e for e in cur if any(c in e for c in "*?[") or not (root/e).resolve().is_relative_to(root.resolve())]
+    new = kept + [e for e in (os.path.relpath(d, root) for d in members) if e not in kept]
     if new == cur: return [], []
     data["workspaces"] = new
     path.write_text(json.dumps(data, indent=2) + "\n")

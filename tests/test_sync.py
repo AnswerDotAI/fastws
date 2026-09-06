@@ -505,16 +505,6 @@ def test_js_tool_default_npm_rejects_others(tmp_path):
     with pytest.raises(SystemExit, match='pnpm'): core._js_tool(tmp_path)
 
 
-def test_merge_entries_preserves_overrides_and_replaces_managed_entries():
-    old = dict(manual='../outside', local='old-path', gone='gone-path')
-    desired = dict(manual='discovered-path', local='new-path', added='added-path')
-    new = core._merge_entries(old, desired, lambda k,v: v.startswith('../'))
-    assert new == dict(manual='../outside', local='new-path', added='added-path')
-    assert core._entry_changes(old, new) == (['added'], ['gone'])
-    assert core._entry_changes(new, new) == ([], [])
-    assert old == dict(manual='../outside', local='old-path', gone='gone-path')
-
-
 def test_sync_ws_package_json_generates_and_preserves(tmp_path):
     pkg = tmp_path/'package.json'
     pkg.write_text('{\n  "name": "ws",\n  "private": true,\n  "workspaces": ["../outside", "gone", "tools/*"]\n}\n')
