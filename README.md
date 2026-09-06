@@ -191,7 +191,13 @@ ws-sync --upgrade
 
 ### `ws-add`
 
-Add a repo to `repos-local.txt`, then run `ws-sync`. Repos already in either list are not added again. Given `owner/repo`, it clones; given the name of an existing local folder (e.g. one just scaffolded with `nbdev-new` or `ship-new`), it resolves `owner/repo` from the folder's `origin` remote instead, telling you exactly what's missing if the folder has no git repo, no GitHub origin, or no `pyproject.toml`. Given a path outside the workspace root, the repo stays where it is and its location is recorded in the local list (no root `pyproject.toml` needed: its packages are discovered on sync):
+Add a repo to `repos-local.txt`, then run `ws-sync`. Repos already in either list are not added again.
+
+The argument determines how fastws locates the checkout:
+
+- `owner/repo` clones the repository.
+- An existing local folder, such as one created by `nbdev-new` or `ship-new`, uses its `origin` remote to resolve `owner/repo`. The command reports a missing Git repo, GitHub origin, or `pyproject.toml`.
+- A path outside the workspace root leaves the checkout in place and records its location in the local list. The checkout needs no root `pyproject.toml`. Sync discovers its packages.
 
 ```bash
 ws-add AnswerDotAI/fastws
@@ -202,7 +208,11 @@ ws-add ~/private  # stays where it is, recorded in repos-local.txt with its loca
 
 ### `ws-remove`
 
-Remove a personal repo: delete its clone, and drop it from `repos-local.txt` and the workspace `pyproject.toml`, then run `uv sync`. Shared baseline members are refused: edit `repos.txt` deliberately to change team policy. Removal also refuses if the directory has uncommitted changes, unpushed commits, no `origin` remote, or isn't a clean git checkout, and always prompts for confirmation before deleting anything. External or custom checkout locations are refused; manage those explicitly:
+Delete a personal repo's clone, remove it from `repos-local.txt` and the workspace `pyproject.toml`, then run `uv sync`.
+
+The command refuses shared baseline members. Edit `repos.txt` deliberately to change the team's baseline. It also refuses external or custom checkout locations, which must be managed explicitly.
+
+Removal requires a clean Git checkout with an `origin` remote and no uncommitted changes or unpushed commits. The command always asks for confirmation before deleting anything:
 
 ```bash
 ws-remove owner/personal-project
@@ -220,11 +230,15 @@ ws-releases --nodeps        # inside a repo: just that repo
 ws-releases --skip 'wip'    # extra start-of-message regex for commits that need no release
 ```
 
-Run from inside a workspace checkout, the sweep narrows to that repo and its transitive workspace dependencies; `--nodeps` narrows it to the repo alone (an error when no project is in play).
+Run from inside a workspace checkout to check that repo and its transitive workspace dependencies. `--nodeps` checks that repo alone and raises an error when no project is selected.
 
-Each pending repo lists its unreleased commit summaries; repos with no releases yet get one quiet `no releases:` line, and fully-released repos appear in `up to date:`. The newest release is picked by version number (publish timestamps can be out of order), and repos whose default branch isn't `main` are handled automatically.
+Each pending repo lists its unreleased commit summaries. Repos with no releases yet get a `no releases:` line. Fully released repos appear in `up to date:`.
 
-Commits whose message matches a start-anchored regex from the skip set need no release and aren't reported. The built-in set covers version bumps and housekeeping (`bump`, `nbdev regen`, `.gitignore`, `docs`, `CI`, ...: `DEFAULT_SKIP` in `fastws.releases`); `[tool.fastws]` in the workspace root `pyproject.toml` adds to it, and names repos that should never be swept (apps that deploy rather than release):
+The newest release is selected by version number, since publish timestamps can be out of order. Each repo's configured default branch is used, whether or not it is `main`.
+
+Commits whose message matches a start-anchored regex from the skip set need no release and aren't reported. `DEFAULT_SKIP` in `fastws.releases` defines the built-in set for version bumps and housekeeping, including `bump`, `nbdev regen`, `.gitignore`, `docs`, and `CI`.
+
+Use `[tool.fastws]` in the workspace root `pyproject.toml` to add skip patterns. Its `release_exclude` list omits entire repos, such as applications that deploy instead of publishing releases:
 
 ```toml
 [tool.fastws]

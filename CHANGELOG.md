@@ -1,5 +1,12 @@
 <!-- do not remove -->
 
+## 0.0.14
+
+### New Features
+
+- Bootstrap workspaces with ws-setup ([#32](https://github.com/AnswerDotAI/fastws/pull/32)), thanks to [@jph00](https://github.com/jph00)
+
+
 ## 0.0.13
 
 ### New Features
