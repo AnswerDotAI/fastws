@@ -137,6 +137,15 @@ def test_external_projects_discovers_root_and_subdir_packages(tmp_path):
     assert core._external_projects(root, [single, multi, tmp_path/'missing']) == [('singlepkg', '../single'), ('tool1', '../multi/tool1')]
 
 
+@pytest.mark.parametrize('manifest', ['pyproject.toml', 'Cargo.toml', 'package.json'])
+def test_project_dirs_expands_patterns_and_filters_manifests(tmp_path, manifest):
+    for name in ('a', 'b', 'empty'): (tmp_path/'pkgs'/name).mkdir(parents=True)
+    for name in ('a', 'b'): (tmp_path/'pkgs'/name/manifest).write_text('')
+    members, exclude = ['pkgs/*', 'pkgs/a'], ['./pkgs/b']
+    assert core._project_dirs(tmp_path, manifest, members, exclude) == [tmp_path/'pkgs'/'a']
+    assert core._project_dirs(tmp_path, members=members, exclude=exclude) == [tmp_path/'pkgs'/'a', tmp_path/'pkgs'/'empty']
+
+
 def test_ws_projects_skip_excluded_dirs_and_template_names(tmp_path):
     (tmp_path/'pyproject.toml').write_text('[tool.uv.workspace]\nmembers = ["./*"]\nexclude = ["skip-*"]\n')
     for name, pkg in (('keep', 'keepme'), ('skip-template', 'skipme'), ('template', '{repo}')):

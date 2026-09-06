@@ -2,7 +2,7 @@
 
 __all__ = ["ws_clone", "ws_pull", "ws_status", "ws_branches", "ws_build", "ws_sync", "ws_add", "ws_remove"]
 
-import ast, fnmatch, hashlib, json, os, re, shutil, subprocess, sys, time
+import ast, fnmatch, glob, hashlib, json, os, re, shutil, subprocess, sys, time
 from pathlib import Path
 from concurrent.futures import ThreadPoolExecutor
 
@@ -94,12 +94,15 @@ def _matches_ws(name: str, pattern: str) -> bool:
     pattern = pattern.strip()
     return any(fnmatch.fnmatch(candidate, normalized) for candidate in (name, f"./{name}") for normalized in (pattern, pattern.removeprefix("./")))
 
-def _is_ws_dir(d: Path, members, exclude) -> bool:
-    return d.is_dir() and not d.name.startswith(".") and any(_matches_ws(d.name, o) for o in members) and not any(_matches_ws(d.name, o) for o in exclude)
+def _project_dirs(root: Path, manifest="", members=("*",), exclude=()) -> list[Path]:
+    "Expand member patterns into unique directories, optionally requiring a manifest; exclusions are relative to root."
+    dirs = dict.fromkeys(d for pat in members for d in sorted(root.glob(pat)))
+    return [d for d in dirs if d.is_dir() and (not manifest or (d/manifest).is_file())
+        and not any(_matches_ws(os.path.relpath(d, root), e) for e in exclude)]
 
 def _ws_dirs(root: Path) -> list[Path]:
     members, exclude = _ws_cfg(root)
-    return [d for d in sorted(root.iterdir()) if _is_ws_dir(d, members, exclude)]
+    return [d for d in _project_dirs(root, exclude=exclude) if not d.name.startswith(".") and any(_matches_ws(d.name, o) for o in members)]
 
 def _root_git_dirs(root: Path) -> list[Path]:
     "Every git checkout directly under `root`, whatever the uv workspace config; `_`-prefixed dirs are private"
@@ -170,7 +173,7 @@ def _external_projects(root: Path, dirs: list[Path]) -> list[tuple[str,str]]:
     res = []
     for d in dirs:
         if not d.is_dir(): continue
-        cands = [d] if (d/"pyproject.toml").exists() else sorted(p for p in d.iterdir() if p.is_dir() and not p.name.startswith((".","_")) and (p/"pyproject.toml").exists())
+        cands = [d] if (d/"pyproject.toml").exists() else [p for p in _project_dirs(d, "pyproject.toml") if not p.name.startswith((".", "_"))]
         for c in cands:
             if name := _read_pyproject_name(c/"pyproject.toml"): res.append((name, os.path.relpath(c, root)))
     return res
@@ -178,13 +181,9 @@ def _external_projects(root: Path, dirs: list[Path]) -> list[tuple[str,str]]:
 def _valid_project_dir(d: Path) -> bool:
     return (d/"pyproject.toml").exists() and bool(_read_pyproject_name(d/"pyproject.toml"))
 
-def _cargo_only(d: Path) -> bool:
-    "A Rust crate with no Python layer: not a pending scaffold, just not a uv workspace member"
-    return (d/"Cargo.toml").exists() and not (d/"pyproject.toml").exists()
-
-def _npm_only(d: Path) -> bool:
-    "A JS package with no Python layer: not a pending scaffold, just not a uv workspace member"
-    return (d/"package.json").exists() and not (d/"pyproject.toml").exists()
+def _non_python_project(d: Path) -> bool:
+    "A Rust or JS project without a Python layer is not a pending Python scaffold."
+    return not (d/"pyproject.toml").exists() and any((d/f).exists() for f in ("Cargo.toml", "package.json"))
 
 def _pending_dirs(root: Path) -> list[str]:
     "uv workspace dirs that are not Python projects yet; sync stops rather than let uv fail on them"
@@ -208,10 +207,8 @@ def _sync_ws_excludes(pyproject_path: Path, root: Path, tracked: set[str]) -> tu
     intent = [e for e in data.get("tool", {}).get("fastws", {}).get("exclude", []) if isinstance(e, str)]
     kept = [e for e in cur if e in intent or any(c in e for c in "*?[") or not (root/e).is_dir() or (e in tracked and not _valid_project_dir(root/e))]
     kept += [e for e in intent if e not in kept]
-    auto = [d.name for d in sorted(root.iterdir())
-            if d.is_dir() and not d.name.startswith(".") and any(_matches_ws(d.name, m) for m in members)
-            and not any(_matches_ws(d.name, e) for e in kept)
-            and (d.name not in tracked or _cargo_only(d) or _npm_only(d)) and not _valid_project_dir(d)]
+    auto = [d.name for d in _project_dirs(root, exclude=kept) if not d.name.startswith(".") and any(_matches_ws(d.name, m) for m in members)
+        and (d.name not in tracked or _non_python_project(d)) and not _valid_project_dir(d)]
     survivors = set(kept) | set(auto)
     new = [e for e in cur if e in survivors] + [e for e in kept + auto if e not in cur]
     if new == cur: return [], []
@@ -528,7 +525,7 @@ _CARGO_KEY = Path(".git/fastws-cargo-key")
 
 def _crate_dirs(root: Path) -> list[Path]:
     "Root dirs containing a Cargo.toml: the crate view of the workspace, independent of uv membership"
-    return [d for d in sorted(root.iterdir()) if d.is_dir() and not d.name.startswith((".", "_")) and (d/"Cargo.toml").exists()]
+    return [d for d in _project_dirs(root, "Cargo.toml") if not d.name.startswith((".", "_"))]
 
 def _cargo_patches(root: Path):
     "Local Cargo patches keyed by normalized Git URL and package name, plus their config file."
@@ -548,12 +545,10 @@ def _crate_pkgs(d: Path):
     try: data = tomllib.loads((d/"Cargo.toml").read_text())
     except tomllib.TOMLDecodeError: return
     if name := data.get("package", {}).get("name"): yield name, d
-    for pat in data.get("workspace", {}).get("members", []):
-        for m in sorted(d.glob(pat)):
-            if not (m/"Cargo.toml").exists(): continue
-            try: sub = tomllib.loads((m/"Cargo.toml").read_text())
-            except tomllib.TOMLDecodeError: continue
-            if name := sub.get("package", {}).get("name"): yield name, m
+    for m in _project_dirs(d, "Cargo.toml", data.get("workspace", {}).get("members", [])):
+        try: sub = tomllib.loads((m/"Cargo.toml").read_text())
+        except tomllib.TOMLDecodeError: continue
+        if name := sub.get("package", {}).get("name"): yield name, m
 
 def _local_crates(root: Path) -> dict[str, Path]:
     "Package name -> dir for every crate under `root`, nested cargo workspace members included"
@@ -710,17 +705,14 @@ def _npm_dirs(root: Path) -> list[Path]:
 
     `[tool.fastws].exclude` matches root-relative paths. `_`-prefixed names and build outputs are skipped."""
     exclude = _fastws_cfg(root).get("exclude", [])
-    def ok(d): return d.is_dir() and not d.name.startswith((".", "_")) and d.name not in _JS_SKIP
-    def excluded(d): return any(_matches_ws(os.path.relpath(d, root), e) for e in exclude)
+    def ok(d): return not d.name.startswith((".", "_")) and d.name not in _JS_SKIP
     res = []
-    for d in sorted(root.iterdir()):
-        if not ok(d) or excluded(d) or not (d/"package.json").is_file(): continue
-        res.append(d)
+    for d in _project_dirs(root, "package.json", exclude=exclude):
+        if not ok(d): continue
         data = json.loads((d/"package.json").read_text())
-        for pat in data.get("workspaces", []):
-            for p in sorted(d.glob(pat)):
-                if ok(p) and not excluded(p) and (p/"package.json").is_file() and p not in res: res.append(p)
-    return res
+        members = [glob.escape(d.name)] + [f"{glob.escape(d.name)}/{p}" for p in data.get("workspaces", [])]
+        res += _project_dirs(root, "package.json", members, exclude)
+    return list(dict.fromkeys(d for d in res if ok(d)))
 
 def _sync_ws_package_json(root: Path, members: list[Path]) -> tuple[list[str], list[str]]:
     """Regenerate `workspaces` in the root package.json (created when first needed) and return (added, removed).
