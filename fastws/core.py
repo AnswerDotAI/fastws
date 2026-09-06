@@ -791,15 +791,9 @@ def _sync_ws_package_json(root: Path, members: list[Path]) -> tuple[list[str], l
     path.write_text(json.dumps(data, indent=2) + "\n")
     return _entry_changes(cur, new)
 
-def _js_tool(root: Path) -> str:
-    "The JS package manager: `[tool.fastws].js` in the workspace pyproject, default npm; bun reads the same `workspaces` list"
-    tool = _fastws_cfg(root).get("js", "npm")
-    if tool not in ("npm", "bun"): raise SystemExit(f"[tool.fastws].js must be npm or bun, not {tool!r}")
-    return tool
-
 def _sync_js(root: Path, members: list[Path]) -> list[Path]:
     "Install the JS workspace, run every native member's build script, and return those members. Cargo handles incremental compilation."
-    tool = _js_tool(root)
+    tool = _fastws_cfg(root).get("js", "npm")
     if not shutil.which(tool): raise SystemExit(f"{tool} is not installed: install it, or set [tool.fastws].js to a package manager that is")
     subprocess.run([tool, "install"], check=True, cwd=root)
     built = [d for d in members if (d/"Cargo.toml").exists()

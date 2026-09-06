@@ -497,14 +497,6 @@ def test_npm_dirs_honours_fastws_exclude(tmp_path):
     assert core._npm_dirs(tmp_path) == [tmp_path/'lib', tmp_path/'py', tmp_path/'py'/'wasm']
 
 
-def test_js_tool_default_npm_rejects_others(tmp_path):
-    assert core._js_tool(tmp_path) == 'npm'
-    (tmp_path/'pyproject.toml').write_text('[tool.fastws]\njs = "bun"\n')
-    assert core._js_tool(tmp_path) == 'bun'
-    (tmp_path/'pyproject.toml').write_text('[tool.fastws]\njs = "pnpm"\n')
-    with pytest.raises(SystemExit, match='pnpm'): core._js_tool(tmp_path)
-
-
 def test_sync_ws_package_json_generates_and_preserves(tmp_path):
     pkg = tmp_path/'package.json'
     pkg.write_text('{\n  "name": "ws",\n  "private": true,\n  "workspaces": ["../outside", "gone", "tools/*"]\n}\n')
@@ -550,8 +542,9 @@ def test_ws_excludes_treat_npm_only_dirs_like_cargo_only(tmp_path):
     assert core._pending_dirs(tmp_path) == ['pending']
 
 
-def test_sync_js_installs_then_builds_native_members(tmp_path, monkeypatch):
-    (tmp_path/'pyproject.toml').write_text('[tool.fastws]\njs = "bun"\n')
+@pytest.mark.parametrize('tool', ['npm', 'bun', 'custom-js'])
+def test_sync_js_installs_then_builds_native_members(tmp_path, monkeypatch, tool):
+    if tool != 'npm': (tmp_path/'pyproject.toml').write_text(f'[tool.fastws]\njs = "{tool}"\n')
     monkeypatch.setattr(core.shutil, 'which', lambda t: f'/usr/bin/{t}')
     app = tmp_path/'app'
     app.mkdir()
@@ -571,17 +564,17 @@ def test_sync_js_installs_then_builds_native_members(tmp_path, monkeypatch):
 
     # a tool that is not installed stops the sync with a one-line message before anything runs
     monkeypatch.setattr(core.shutil, 'which', lambda t: None)
-    with pytest.raises(SystemExit, match='bun'): core._sync_js(tmp_path, members)
+    with pytest.raises(SystemExit, match='not installed'): core._sync_js(tmp_path, members)
     assert calls == []
     monkeypatch.setattr(core.shutil, 'which', lambda t: f'/usr/bin/{t}')
 
     # install at the root with the configured tool; a native member with no pkg/ yet is built
     assert core._sync_js(tmp_path, members) == [wasm]
-    assert calls == [(['bun', 'install'], tmp_path), (['bun', 'run', 'build'], wasm)]
+    assert calls == [([tool, 'install'], tmp_path), ([tool, 'run', 'build'], wasm)]
 
     # Existing outputs must not prevent Cargo from checking dependencies on the next sync.
     (wasm/'pkg').mkdir()
     (wasm/'pkg'/'out.wasm').write_text('')
     calls.clear()
     assert core._sync_js(tmp_path, members) == [wasm]
-    assert calls == [(['bun', 'install'], tmp_path), (['bun', 'run', 'build'], wasm)]
+    assert calls == [([tool, 'install'], tmp_path), ([tool, 'run', 'build'], wasm)]
