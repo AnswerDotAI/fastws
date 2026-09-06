@@ -704,21 +704,22 @@ def _cargo_update(root: Path, workers: int = 16):
                 print(f"{name}:\n" + "\n".join(lines))
 
 _JS_SKIP = {"node_modules", "pkg"}
-_JS_LOCKS = ("bun.lock", "package-lock.json", "yarn.lock", "pnpm-lock.yaml")
 
 def _npm_dirs(root: Path) -> list[Path]:
-    """JS members: a root repo dir with a package.json, else its immediate subdirs with a package.json.
+    """Discover root JS packages and members declared in their package.json `workspaces` lists.
 
-    A subdir with its own lockfile manages itself and stays out; a root repo is always in. `[tool.fastws].exclude`
-    matches the root-relative path (`ghapi/examples`). `_`-prefixed names and build outputs are skipped."""
+    `[tool.fastws].exclude` matches root-relative paths. `_`-prefixed names and build outputs are skipped."""
     exclude = _fastws_cfg(root).get("exclude", [])
     def ok(d): return d.is_dir() and not d.name.startswith((".", "_")) and d.name not in _JS_SKIP
     def excluded(d): return any(_matches_ws(os.path.relpath(d, root), e) for e in exclude)
     res = []
     for d in sorted(root.iterdir()):
-        if not ok(d) or excluded(d): continue
-        if (d/"package.json").exists(): res.append(d)
-        else: res += [p for p in sorted(d.iterdir()) if ok(p) and (p/"package.json").exists() and not excluded(p) and not any((p/l).exists() for l in _JS_LOCKS)]
+        if not ok(d) or excluded(d) or not (d/"package.json").is_file(): continue
+        res.append(d)
+        data = json.loads((d/"package.json").read_text())
+        for pat in data.get("workspaces", []):
+            for p in sorted(d.glob(pat)):
+                if ok(p) and not excluded(p) and (p/"package.json").is_file() and p not in res: res.append(p)
     return res
 
 def _sync_ws_package_json(root: Path, members: list[Path]) -> tuple[list[str], list[str]]:
@@ -748,7 +749,8 @@ def _sync_js(root: Path, members: list[Path]) -> list[Path]:
     tool = _js_tool(root)
     if not shutil.which(tool): raise SystemExit(f"{tool} is not installed: install it, or set [tool.fastws].js to a package manager that is")
     subprocess.run([tool, "install"], check=True, cwd=root)
-    built = [d for d in members if (d/"Cargo.toml").exists()]
+    built = [d for d in members if (d/"Cargo.toml").exists()
+        and json.loads((d/"package.json").read_text()).get("scripts", {}).get("build")]
     for d in built: subprocess.run([tool, "run", "build"], check=True, cwd=d)
     return built
 

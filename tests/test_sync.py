@@ -378,20 +378,23 @@ def test_sync_cargo_wrapper(tmp_path, monkeypatch):
     assert core.tomllib.loads(config.read_text())['build']['rustc-wrapper'] == 'other-cache'
 
 
-def test_npm_dirs_discovers_root_and_subdir_packages(tmp_path):
+def test_npm_dirs_discovers_root_and_declared_packages(tmp_path):
     for name in ('app', 'crate', 'plain', '_scratch', 'node_modules'): (tmp_path/name).mkdir()
     (tmp_path/'app'/'package.json').write_text('{}')
     (tmp_path/'app'/'tools').mkdir()
-    (tmp_path/'app'/'tools'/'package.json').write_text('{}')  # a root package owns its subdirs: not a separate member
-    (tmp_path/'app'/'package-lock.json').write_text('{}')  # a repo's own lockfile does not opt it out: every checkout is in the workspace
+    (tmp_path/'app'/'tools'/'package.json').write_text('{}')  # undeclared packages are not discovered
+    (tmp_path/'app'/'package-lock.json').write_text('{}')
+    (tmp_path/'crate'/'package.json').write_text('{"private": true, "workspaces": ["wasm", "front*", "wasm", "missing"]}')
     for name in ('wasm', 'node_modules', 'pkg', '_tmp', 'docs', 'frontend'): (tmp_path/'crate'/name).mkdir()
     for name in ('wasm', 'node_modules', 'pkg', '_tmp', 'docs', 'frontend'): (tmp_path/'crate'/name/'package.json').write_text('{}')
-    (tmp_path/'crate'/'wasm'/'Cargo.toml').write_text('')  # native binding; docs is a plain package and joins the same way
-    (tmp_path/'crate'/'frontend'/'bun.lock').write_text('')  # a subdir with its own lockfile manages itself
+    (tmp_path/'crate'/'wasm'/'Cargo.toml').write_text('')
+    (tmp_path/'crate'/'frontend'/'bun.lock').write_text('')  # lockfiles do not override explicit membership
+    (tmp_path/'plain'/'child').mkdir()
+    (tmp_path/'plain'/'child'/'package.json').write_text('{}')
     (tmp_path/'_scratch'/'package.json').write_text('{}')
     (tmp_path/'node_modules'/'package.json').write_text('{}')
 
-    assert core._npm_dirs(tmp_path) == [tmp_path/'app', tmp_path/'crate'/'docs', tmp_path/'crate'/'wasm']
+    assert core._npm_dirs(tmp_path) == [tmp_path/'app', tmp_path/'crate', tmp_path/'crate'/'wasm', tmp_path/'crate'/'frontend']
 
 
 def test_npm_dirs_honours_fastws_exclude(tmp_path):
@@ -402,8 +405,9 @@ def test_npm_dirs_honours_fastws_exclude(tmp_path):
     for name in ('examples', 'wasm'):
         (tmp_path/'py'/name).mkdir(parents=True)
         (tmp_path/'py'/name/'package.json').write_text('{}')  # examples is excluded by its root-relative path
+    (tmp_path/'py'/'package.json').write_text('{"private": true, "workspaces": ["*"]}')
 
-    assert core._npm_dirs(tmp_path) == [tmp_path/'lib', tmp_path/'py'/'wasm']
+    assert core._npm_dirs(tmp_path) == [tmp_path/'lib', tmp_path/'py', tmp_path/'py'/'wasm']
 
 
 def test_js_tool_default_npm_rejects_others(tmp_path):
@@ -453,18 +457,19 @@ def test_sync_js_installs_then_builds_native_members(tmp_path, monkeypatch):
     monkeypatch.setattr(core.shutil, 'which', lambda t: f'/usr/bin/{t}')
     app = tmp_path/'app'
     app.mkdir()
-    (app/'package.json').write_text('{}')
+    (app/'package.json').write_text('{"scripts": {"build": "vite build"}}')
     crate = tmp_path/'crate'
     wasm = crate/'wasm'
     for d in (crate/'src', wasm/'src'): d.mkdir(parents=True)
     (crate/'Cargo.toml').write_text('[package]\nname = "crate"\n')
+    (crate/'package.json').write_text('{"private": true, "workspaces": ["wasm"]}')
     (crate/'src'/'lib.rs').write_text('')
     (wasm/'Cargo.toml').write_text('[package]\nname = "crate-wasm"\n')
-    (wasm/'package.json').write_text('{}')
+    (wasm/'package.json').write_text('{"scripts": {"build": "cargo build"}}')
     (wasm/'src'/'lib.rs').write_text('')
     calls = []
     monkeypatch.setattr(core.subprocess, 'run', lambda cmd, **kw: calls.append((cmd, kw.get('cwd'))))
-    members = [app, wasm]
+    members = [app, crate, wasm]
 
     # a tool that is not installed stops the sync with a one-line message before anything runs
     monkeypatch.setattr(core.shutil, 'which', lambda t: None)
