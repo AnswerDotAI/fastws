@@ -451,11 +451,11 @@ def ws_branches(
 
 _BUILD_SKIP_DIRS = {".git", "__pycache__", ".venv", "node_modules", "dist", "build", "target", ".ipynb_checkpoints", ".pytest_cache", ".mypy_cache"}
 
-def _src_mtime(d: Path, skip: set[str] = _BUILD_SKIP_DIRS) -> float:
-    "Newest file mtime under `d`, ignoring VCS internals and build outputs (the dir names in `skip`)"
+def _src_mtime(d: Path) -> float:
+    "Newest file mtime under `d`, ignoring VCS internals and build outputs"
     newest = 0.0
     for dirpath, dirnames, filenames in os.walk(d):
-        dirnames[:] = [o for o in dirnames if o not in skip and not o.endswith(".egg-info")]
+        dirnames[:] = [o for o in dirnames if o not in _BUILD_SKIP_DIRS and not o.endswith(".egg-info")]
         for f in filenames:
             try: newest = max(newest, os.stat(os.path.join(dirpath, f)).st_mtime)
             except OSError: pass
@@ -743,18 +743,12 @@ def _js_tool(root: Path) -> str:
     if tool not in ("npm", "bun"): raise SystemExit(f"[tool.fastws].js must be npm or bun, not {tool!r}")
     return tool
 
-def _js_stale(root: Path, d: Path) -> bool:
-    "Does JS member `d` need its build script? Only members with a Cargo.toml build natively, into `pkg/`, which is stale when missing or older than any source in the member's repo (the parent crate included)"
-    if not (d/"Cargo.toml").exists(): return False
-    pkg, repo = d/"pkg", d if d.parent.resolve() == root.resolve() else d.parent
-    return not pkg.exists() or _src_mtime(pkg) < _src_mtime(repo, _BUILD_SKIP_DIRS | _JS_SKIP)
-
 def _sync_js(root: Path, members: list[Path]) -> list[Path]:
-    "Install the JS workspace at `root`, then run the build script of each native member whose output is stale (the JS analog of `maturin develop`); returns the members built"
+    "Install the JS workspace, run every native member's build script, and return those members. Cargo handles incremental compilation."
     tool = _js_tool(root)
     if not shutil.which(tool): raise SystemExit(f"{tool} is not installed: install it, or set [tool.fastws].js to a package manager that is")
     subprocess.run([tool, "install"], check=True, cwd=root)
-    built = [d for d in members if _js_stale(root, d)]
+    built = [d for d in members if (d/"Cargo.toml").exists()]
     for d in built: subprocess.run([tool, "run", "build"], check=True, cwd=d)
     return built
 
@@ -807,7 +801,7 @@ async def ws_sync(
     _sync_cargo_keys(root)
     subprocess.run(["uv", "sync", "-U"] if up else ["uv", "sync"], check=True, cwd=root)
     if up: _upgrade_stamp(root).touch()
-    if js_members and (built := _sync_js(root, js_members)): print(f"JS packages built: {', '.join(os.path.relpath(d, root) for d in built)}")
+    if js_members and (built := _sync_js(root, js_members)): print(f"JS build scripts run: {', '.join(os.path.relpath(d, root) for d in built)}")
 
 @call_parse
 async def ws_add(

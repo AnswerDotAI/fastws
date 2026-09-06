@@ -1,4 +1,4 @@
-import json, os, pytest, time
+import json, os, pytest
 from types import SimpleNamespace
 from fastgit import Git
 import fastws.core as core
@@ -448,7 +448,7 @@ def test_ws_excludes_treat_npm_only_dirs_like_cargo_only(tmp_path):
     assert core._pending_dirs(tmp_path) == ['pending']
 
 
-def test_sync_js_installs_then_builds_stale_native_members(tmp_path, monkeypatch):
+def test_sync_js_installs_then_builds_native_members(tmp_path, monkeypatch):
     (tmp_path/'pyproject.toml').write_text('[tool.fastws]\njs = "bun"\n')
     monkeypatch.setattr(core.shutil, 'which', lambda t: f'/usr/bin/{t}')
     app = tmp_path/'app'
@@ -476,15 +476,9 @@ def test_sync_js_installs_then_builds_stale_native_members(tmp_path, monkeypatch
     assert core._sync_js(tmp_path, members) == [wasm]
     assert calls == [(['bun', 'install'], tmp_path), (['bun', 'run', 'build'], wasm)]
 
-    # a pkg/ newer than every source in the member's repo means nothing to rebuild
+    # Existing outputs must not prevent Cargo from checking dependencies on the next sync.
     (wasm/'pkg').mkdir()
     (wasm/'pkg'/'out.wasm').write_text('')
-    now = time.time()
-    os.utime(wasm/'pkg'/'out.wasm', (now+10, now+10))
     calls.clear()
-    assert core._sync_js(tmp_path, members) == []
-    assert calls == [(['bun', 'install'], tmp_path)]
-
-    # a change anywhere in that repo, including the parent crate the wasm depends on, makes it stale again
-    os.utime(crate/'src'/'lib.rs', (now+20, now+20))
     assert core._sync_js(tmp_path, members) == [wasm]
+    assert calls == [(['bun', 'install'], tmp_path), (['bun', 'run', 'build'], wasm)]
