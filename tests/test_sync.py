@@ -471,7 +471,7 @@ def test_npm_dirs_discovers_root_and_declared_packages(tmp_path):
     (tmp_path/'app'/'tools').mkdir()
     (tmp_path/'app'/'tools'/'package.json').write_text('{}')  # undeclared packages are not discovered
     (tmp_path/'app'/'package-lock.json').write_text('{}')
-    (tmp_path/'crate'/'package.json').write_text('{"private": true, "workspaces": ["wasm", "front*", "wasm", "missing"]}')
+    (tmp_path/'crate'/'package.json').write_text('{"private": true, "workspaces": ["wasm", "front*", "pkg", "node_modules", "wasm", "missing"]}')
     for name in ('wasm', 'node_modules', 'pkg', '_tmp', 'docs', 'frontend'): (tmp_path/'crate'/name).mkdir()
     for name in ('wasm', 'node_modules', 'pkg', '_tmp', 'docs', 'frontend'): (tmp_path/'crate'/name/'package.json').write_text('{}')
     (tmp_path/'crate'/'wasm'/'Cargo.toml').write_text('')
@@ -481,7 +481,7 @@ def test_npm_dirs_discovers_root_and_declared_packages(tmp_path):
     (tmp_path/'_scratch'/'package.json').write_text('{}')
     (tmp_path/'node_modules'/'package.json').write_text('{}')
 
-    assert core._npm_dirs(tmp_path) == [tmp_path/'app', tmp_path/'crate', tmp_path/'crate'/'wasm', tmp_path/'crate'/'frontend']
+    assert core._npm_dirs(tmp_path) == [tmp_path/'app', tmp_path/'crate', tmp_path/'crate'/'wasm', tmp_path/'crate'/'frontend', tmp_path/'crate'/'pkg']
 
 
 def test_npm_dirs_honours_fastws_exclude(tmp_path):

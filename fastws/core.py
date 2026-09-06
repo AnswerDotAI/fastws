@@ -758,14 +758,10 @@ def _cargo_update(root: Path, workers: int = 16):
             elif lines := [l for l in out.splitlines() if l.lstrip().startswith(("Updating ", "Adding ", "Removing ")) and "crates.io index" not in l]:
                 print(f"{name}:\n" + "\n".join(lines))
 
-_JS_SKIP = {"node_modules", "pkg"}
-
 def _npm_dirs(root: Path) -> list[Path]:
-    """Discover root JS packages and members declared in their package.json `workspaces` lists.
-
-    `[tool.fastws].exclude` matches root-relative paths. `_`-prefixed names and build outputs are skipped."""
+    "Find root JavaScript packages and their declared workspace members."
     exclude = _fastws_cfg(root).get("exclude", [])
-    def ok(d): return not d.name.startswith((".", "_")) and d.name not in _JS_SKIP
+    def ok(d): return not d.name.startswith((".", "_")) and d.name != "node_modules"
     res = []
     for d in _project_dirs(root, "package.json", exclude=exclude):
         if not ok(d): continue
@@ -775,11 +771,7 @@ def _npm_dirs(root: Path) -> list[Path]:
     return list(dict.fromkeys(d for d in res if ok(d)))
 
 def _sync_ws_package_json(root: Path, members: list[Path]) -> tuple[list[str], list[str]]:
-    """Regenerate `workspaces` in the root package.json (created when first needed) and return (added, removed).
-
-    Entries pointing outside `root` and globs are kept as-is. Entries for dirs inside it are regenerated
-    from `members`, so the JS install links every discovered package: the npm analog of editable installs.
-    Only the list form of `workspaces` is managed; the object form (`{"packages": [...]}`) is not supported."""
+    "Update package.json workspaces, preserving external paths and globs; return (added, removed)."
     path = root/"package.json"
     data = json.loads(path.read_text()) if path.exists() else {"private": True}
     cur = data.get("workspaces", [])
