@@ -1,5 +1,14 @@
 <!-- do not remove -->
 
+## 0.0.15
+
+### New Features
+
+- Merge tracked package.json.shared into root package.json on sync, and quiet routine npm install and build output ([#34](https://github.com/AnswerDotAI/fastws/issues/34))
+- Explain Rust toolchain setup before JavaScript builds ([#33](https://github.com/AnswerDotAI/fastws/pull/33)), thanks to [@jph00](https://github.com/jph00)
+- Sync JavaScript packages alongside Python and Rust members ([#30](https://github.com/AnswerDotAI/fastws/pull/30)), thanks to [@ncoop57](https://github.com/ncoop57)
+
+
 ## 0.0.14
 
 ### New Features
