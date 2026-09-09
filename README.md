@@ -186,7 +186,11 @@ Fastws discovers JavaScript packages directly under the workspace root. It reads
 
 Each sync updates `workspaces` in the root `package.json`. It creates the file when needed. It preserves external paths, globs, and unrelated settings. It reports added and removed packages.
 
+An optional tracked `package.json.shared` is merged into the root `package.json` on every sync. Object-valued fields merge one level deep, shared values win conflicts, and arrays replace rather than concatenate. Unrelated local settings remain; removing a shared key does not delete its local value. Workspace discovery still manages `workspaces`. Use this file for shared policy such as version-pinned npm `allowScripts` approvals.
+
 After `uv sync`, fastws runs `<tool> install` at the workspace root. It then runs `<tool> run build` in each JavaScript package containing both `Cargo.toml` and a `build` script. Cargo handles incremental compilation. Other build steps still run.
+
+For npm, sync hides routine install summaries and build-command banners. Install warnings, audit findings, unreviewed install scripts, and failure diagnostics remain visible. Build scripts retain their own output; configure their tools to suppress routine progress. Other package managers retain their normal output.
 
 When Rust-backed JavaScript builds are present, fastws checks before dependency installation that `rustc` and `cargo` on `PATH` are rustup's proxies. Install rustup from https://rustup.rs and select a stable toolchain with `rustup default stable` if not already configured. If another Rust installation shadows rustup, put its bin directory first on `PATH` after Homebrew's shell setup: `export PATH="$HOME/.cargo/bin:$PATH"` (use `$CARGO_HOME/bin` for a custom Cargo home), then open a new shell. Homebrew Rust can remain installed for Homebrew's own use. Fastws reports missing or shadowed rustup without changing your shell or installing a different toolchain. Packages using wasm-pack can then install their WASM target and matching binding tools automatically as part of their build.
 

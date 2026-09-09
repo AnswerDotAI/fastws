@@ -771,15 +771,20 @@ def _npm_dirs(root: Path) -> list[Path]:
     return list(dict.fromkeys(d for d in res if ok(d)))
 
 def _sync_ws_package_json(root: Path, members: list[Path]) -> tuple[list[str], list[str]]:
-    "Update package.json workspaces, preserving external paths and globs; return (added, removed)."
+    "Merge shared settings and update workspaces, preserving external paths and globs; return (added, removed)."
     path = root/"package.json"
     data = json.loads(path.read_text()) if path.exists() else {"private": True}
+    before = json.dumps(data)
+    shared = root/"package.json.shared"
+    if shared.exists():
+        for k,v in json.loads(shared.read_text()).items():
+            data[k] = data[k] | v if isinstance(v, dict) and isinstance(data.get(k), dict) else v
     cur = data.get("workspaces", [])
     if not isinstance(cur, list): raise SystemExit(f"{path}: fastws requires `workspaces` to be a list of package paths.")
     kept = [e for e in cur if any(c in e for c in "*?[") or not (root/e).resolve().is_relative_to(root.resolve())]
     new = kept + [e for e in (os.path.relpath(d, root) for d in members) if e not in kept]
-    if new == cur: return [], []
-    data["workspaces"] = new
+    if new != cur: data["workspaces"] = new
+    if json.dumps(data) == before: return [], []
     path.write_text(json.dumps(data, indent=2) + "\n")
     return _entry_changes(cur, new)
 
@@ -801,13 +806,28 @@ def _check_rustup():
             '(normally: export PATH="$HOME/.cargo/bin:$PATH"; use $CARGO_HOME/bin when customized). '
             "Homebrew Rust can remain installed. Open a new shell and rerun ws-sync.")
 
+def _npm_install(root: Path):
+    "Hide npm's install summary, but retain warnings, audit findings, and failure diagnostics."
+    try: res = subprocess.run(["npm", "install", "--json"], check=True, cwd=root, stdout=subprocess.PIPE, text=True)
+    except subprocess.CalledProcessError as e:
+        if e.stdout: print(e.stdout, file=sys.stderr, end="")
+        raise
+    try: data = json.loads(res.stdout)
+    except json.JSONDecodeError:
+        print(res.stdout, file=sys.stderr, end="")
+        raise
+    if data.get("audit", {}).get("vulnerabilities", {}).get("total") or data.get("unreviewedScripts"):
+        print(f"npm install findings ({root}):\n{res.stdout}", file=sys.stderr, end="")
+
 def _sync_js(root: Path, members: list[Path]) -> list[Path]:
     "Install the JS workspace, run every native member's build script, and return those members. Cargo handles incremental compilation."
     tool = _fastws_cfg(root).get("js", "npm")
     if not shutil.which(tool): raise SystemExit(f"{tool} is not installed: install it, or set [tool.fastws].js to a package manager that is")
-    subprocess.run([tool, "install"], check=True, cwd=root)
+    if tool == "npm": _npm_install(root)
+    else: subprocess.run([tool, "install"], check=True, cwd=root)
     built = _native_js(members)
-    for d in built: subprocess.run([tool, "run", "build"], check=True, cwd=d)
+    cmd = [tool, "run", "--silent", "build"] if tool == "npm" else [tool, "run", "build"]
+    for d in built: subprocess.run(cmd, check=True, cwd=d)
     return built
 
 @call_parse
@@ -865,7 +885,7 @@ async def ws_sync(
     _sync_cargo_keys(root)
     subprocess.run(["uv", "sync", "-U"] if up else ["uv", "sync"], check=True, cwd=root)
     if up: _upgrade_stamp(root).touch()
-    if js_members and (built := _sync_js(root, js_members)): print(f"JS build scripts run: {', '.join(os.path.relpath(d, root) for d in built)}")
+    if js_members: _sync_js(root, js_members)
 
 @call_parse
 async def ws_add(

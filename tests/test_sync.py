@@ -524,6 +524,22 @@ def test_sync_ws_package_json_rejects_object_form(tmp_path, workspaces):
     assert pkg.read_text() == content
 
 
+def test_sync_ws_package_json_merges_shared_settings(tmp_path):
+    pkg, shared = tmp_path/'package.json', tmp_path/'package.json.shared'
+    pkg.write_text(json.dumps({'name': 'local', 'workspaces': ['app'], 'keywords': ['local'],
+        'allowScripts': {'wasm-pack@0.15.0': False, 'other': False}}))
+    shared.write_text(json.dumps({'keywords': ['shared'], 'allowScripts': {'wasm-pack@0.15.0': True}}))
+    assert core._sync_ws_package_json(tmp_path, [tmp_path/'app']) == ([], [])
+    assert json.loads(pkg.read_text()) == {'name': 'local', 'workspaces': ['app'], 'keywords': ['shared'],
+        'allowScripts': {'wasm-pack@0.15.0': True, 'other': False}}
+    content, mtime = pkg.read_text(), pkg.stat().st_mtime_ns
+    core._sync_ws_package_json(tmp_path, [tmp_path/'app'])
+    assert pkg.stat().st_mtime_ns == mtime
+    shared.write_text('{}')
+    core._sync_ws_package_json(tmp_path, [tmp_path/'app'])
+    assert pkg.read_text() == content
+
+
 def test_ws_excludes_treat_npm_only_dirs_like_cargo_only(tmp_path):
     pyproject = tmp_path/'pyproject.toml'
     pyproject.write_text('[project]\nname = "uvws"\n\n[tool.uv.workspace]\nmembers = ["./*"]\nexclude = []\n')
@@ -535,32 +551,14 @@ def test_ws_excludes_treat_npm_only_dirs_like_cargo_only(tmp_path):
     assert core._pending_dirs(tmp_path) == ['pending']
 
 
-@pytest.mark.parametrize('tool', ['npm', 'custom-js'])
-def test_sync_js_installs_then_builds_native_members(tmp_path, monkeypatch, tool):
-    if tool != 'npm': (tmp_path/'pyproject.toml').write_text(f'[tool.fastws]\njs = "{tool}"\n')
-    app = tmp_path/'app'
-    app.mkdir()
+def test_native_js_requires_rust_and_build_script(tmp_path):
+    app, crate, wasm = [tmp_path/n for n in ('app', 'crate', 'wasm')]
+    for d in (app, crate, wasm): d.mkdir()
     (app/'package.json').write_text('{"scripts": {"build": "vite build"}}')
-    crate = tmp_path/'crate'
-    wasm = crate/'wasm'
-    (wasm/'pkg').mkdir(parents=True)
-    (wasm/'pkg'/'out.wasm').write_text('')
     for d in (crate, wasm): (d/'Cargo.toml').write_text('')
-    (crate/'package.json').write_text('{"private": true, "workspaces": ["wasm"]}')
+    (crate/'package.json').write_text('{}')
     (wasm/'package.json').write_text('{"scripts": {"build": "cargo build"}}')
-    calls = []
-    monkeypatch.setattr(core.subprocess, 'run', lambda cmd, **kw: calls.append((cmd, kw.get('cwd'))))
-    members = [app, crate, wasm]
-
-    # a tool that is not installed stops the sync with a one-line message before anything runs
-    monkeypatch.setattr(core.shutil, 'which', lambda t: None)
-    with pytest.raises(SystemExit, match='not installed'): core._sync_js(tmp_path, members)
-    assert calls == []
-    monkeypatch.setattr(core.shutil, 'which', lambda t: f'/usr/bin/{t}')
-
-    # Install first, then run the native build even with existing output.
-    assert core._sync_js(tmp_path, members) == [wasm]
-    assert calls == [([tool, 'install'], tmp_path), ([tool, 'run', 'build'], wasm)]
+    assert core._native_js([app, crate, wasm]) == [wasm]
 
 
 def test_check_rustup_missing(monkeypatch):
