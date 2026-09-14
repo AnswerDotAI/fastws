@@ -59,14 +59,14 @@ class ReleaseReport(list):
 def _cwd_project(root: Path, repos_file: str = "repos.txt") -> str|None:
     "Dir name of the workspace member checkout containing cwd (None at the root or outside every member)."
     cwd = Path.cwd().resolve()
-    for _, d in _load_repo_entries(_resolve_path(root, repos_file), root):
+    for _, d, _ in _load_repo_entries(_resolve_path(root, repos_file), root):
         if cwd.is_relative_to(d.resolve()): return d.name
     return None
 
 async def check_releases(project: str = None, skip=None, workspace: str = "", repos_file: str = "repos.txt", nodeps: bool = False) -> ReleaseReport:
     "Sweep every workspace repo for unreleased commits; a `project` (given, or detected from cwd inside a member checkout) limits the sweep to its transitive dependency closure, or to itself alone with `nodeps`. `[tool.fastws].release_exclude` names repos to leave out (apps that deploy rather than release)."
     root = _ws_root(workspace)
-    repos = [r for r,d in _load_repo_entries(_resolve_path(root, repos_file), root)]
+    repos = [r for r,_,_ in _load_repo_entries(_resolve_path(root, repos_file), root)]
     excl = {e.casefold() for e in _fastws_cfg(root).get("release_exclude", [])}
     repos = [r for r in repos if r.split("/")[-1].casefold() not in excl]
     if project is None: project = _cwd_project(root, repos_file)

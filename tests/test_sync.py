@@ -40,40 +40,46 @@ def fake_uv(monkeypatch):
 
 def test_repos_file_roundtrip(tmp_path):
     repos_path = tmp_path/'repos.txt'
-    repos_path.write_text('# header\nAnswerDotAI/fastws\njph00/private ~/private\nfastai/fastai sub/dir\n')
+    repos_path.write_text('# header\nAnswerDotAI/fastws[dev]\njph00/private[docs] ~/private\nfastai/fastai sub/dir\n')
 
     assert core._load_repos(repos_path) == ['AnswerDotAI/fastws', 'jph00/private', 'fastai/fastai']
     assert core._load_repo_entries(repos_path, tmp_path) == [
-        ('AnswerDotAI/fastws', tmp_path/'fastws'),
-        ('jph00/private', core.Path('~/private').expanduser()),
-        ('fastai/fastai', tmp_path/'sub'/'dir')]
+        ('AnswerDotAI/fastws', tmp_path/'fastws', {'dev'}),
+        ('jph00/private', core.Path('~/private').expanduser(), {'docs'}),
+        ('fastai/fastai', tmp_path/'sub'/'dir', set())]
 
     # discovery and ws-add write only extras, never change the shared baseline
     original = repos_path.read_text()
     local = tmp_path/'repos-local.txt'
-    added = core._update_repos_file(repos_path, ['answerdotai/fastws', 'jph00/private', 'fastai/new'])
-    assert added == ['fastai/new']
-    assert local.read_text() == 'fastai/new\n'
+    added = core._update_repos_file(repos_path, ['answerdotai/fastws', 'jph00/private', 'fastai/new[dev]'])
+    assert added == ['fastai/new[dev]']
+    assert local.read_text() == 'fastai/new[dev]\n'
     assert repos_path.read_text() == original
-    assert core._load_repo_entries(repos_path, tmp_path)[-1] == ('fastai/new', tmp_path/'new')
+    assert core._load_repo_entries(repos_path, tmp_path)[-1] == ('fastai/new', tmp_path/'new', {'dev'})
 
     # remove matches case-insensitively, preserves other lines (including comments), and reports absence
     assert core._remove_from_repos_file(local, 'FASTAI/new') is True
     assert core._remove_from_repos_file(repos_path, 'AnswerDotAI/gone') is False
-    assert repos_path.read_text() == '# header\nAnswerDotAI/fastws\njph00/private ~/private\nfastai/fastai sub/dir\n'
+    assert repos_path.read_text() == original
 
 
 def test_repo_lists_deduplicate_and_reject_conflicting_locations(tmp_path):
     base, local = tmp_path/'repos.txt', tmp_path/'repos-local.txt'
-    base.write_text('org/core\n')
-    local.write_text('ORG/core\norg/extra ../external\n')
-    assert core._load_repo_entries(base, tmp_path) == [('org/core', tmp_path/'core'), ('org/extra', tmp_path/'../external')]
+    base.write_text('org/core[dev]\norg/extra[docs] ../external\n')
+    local.write_text('ORG/core[TEST, dev]\norg/extra[dev]\n')
+    assert core._load_repo_entries(base, tmp_path) == [
+        ('org/core', tmp_path/'core', {'dev', 'test'}), ('org/extra', tmp_path/'../external', {'docs', 'dev'})]
     local.write_text('org/core ../elsewhere\n')
     with pytest.raises(SystemExit, match='location'): core._load_repo_entries(base, tmp_path)
     local.write_text('different/core\n')
     with pytest.raises(SystemExit, match='location'): core._load_repo_entries(base, tmp_path)
     base.unlink()
-    assert core._load_repo_entries(base, tmp_path) == [('different/core', tmp_path/'core')]
+    assert core._load_repo_entries(base, tmp_path) == [('different/core', tmp_path/'core', set())]
+
+
+@pytest.mark.parametrize('entry', ['org/repo[dev', 'org/repo[dev]]', 'org/repo[]'])
+def test_invalid_repo_extras(entry):
+    with pytest.raises(SystemExit, match='Invalid repo entry'): core._parse_repo_line(entry)
 
 
 async def test_sync_updates_baseline_before_cloning_and_keeps_removed_repos(tmp_path, monkeypatch, fake_uv):
@@ -87,21 +93,22 @@ async def test_sync_updates_baseline_before_cloning_and_keeps_removed_repos(tmp_
     for name in ('old', 'new', 'extra'):
         d = tmp_path/name
         d.mkdir()
-        (d/'pyproject.toml').write_text(f'[project]\nname = "{name}"\n')
+        (d/'pyproject.toml').write_text(f'[project]\nname = "{name}-pkg"\n[project.optional-dependencies]\ndev = []\ntest = []\n')
         mk_repo(d, origin=origins/f'{name}.git')
     seed.mkdir()
-    (seed/'repos.txt').write_text('org/old\n')
+    (seed/'repos.txt').write_text('org/old[dev]\n')
     (seed/'.gitignore').write_text('*/\npyproject.toml\nrepos-local.txt\n')
     (seed/'pyproject.tmpl').write_text('[project]\nname = "workspace"\ndependencies = []\n[tool.uv.workspace]\nmembers = ["./*"]\n')
     g = mk_repo(seed, origin=origins/'workspace.git')
     Git(tmp_path, raise_exc=True).clone(str(origins/'workspace.git'), str(root))
     Git(root, raise_exc=True).clone('git@github.com:org/extra.git', str(root/'extra'))
+    (root/'repos-local.txt').write_text('org/old[test]\n')
 
     await core.ws_sync(str(root))
     assert (root/'old'/'pyproject.toml').exists()
-    assert (root/'repos.txt').read_text() == 'org/old\n'
-    assert (root/'repos-local.txt').read_text() == 'org/extra\n'
-    assert set(core.tomllib.loads((root/'pyproject.toml').read_text())['project']['dependencies']) == {'old', 'extra'}
+    assert (root/'repos.txt').read_text() == 'org/old[dev]\n'
+    assert (root/'repos-local.txt').read_text() == 'org/old[test]\norg/extra\n'
+    assert set(core.tomllib.loads((root/'pyproject.toml').read_text())['project']['dependencies']) == {'old-pkg[dev,test]', 'extra-pkg'}
 
     (seed/'repos.txt').write_text('org/new\n')
     g.commit('-a', m='new shared baseline')
@@ -111,7 +118,10 @@ async def test_sync_updates_baseline_before_cloning_and_keeps_removed_repos(tmp_
     assert (root/'old'/'pyproject.toml').exists()
     assert (root/'repos.txt').read_text() == 'org/new\n'
     assert set(core._load_repos(root/'repos-local.txt')) == {'org/extra', 'org/old'}
-    assert set(core.tomllib.loads((root/'pyproject.toml').read_text())['project']['dependencies']) == {'old', 'new', 'extra'}
+    assert set(core.tomllib.loads((root/'pyproject.toml').read_text())['project']['dependencies']) == {'old-pkg[test]', 'new-pkg', 'extra-pkg'}
+    (root/'repos-local.txt').write_text('org/extra\n')
+    await core.ws_sync(str(root))
+    assert set(core.tomllib.loads((root/'pyproject.toml').read_text())['project']['dependencies']) == {'old-pkg', 'new-pkg', 'extra-pkg'}
 
     (seed/'repos.txt').write_text('org/missing\n')
     g.commit('-a', m='unavailable member')
@@ -162,6 +172,23 @@ def test_ws_pyproject_preserves_existing_entries(tmp_path):
     assert 'alpha = { workspace = true }' in content
 
 
+def test_sync_extras_preserves_constraints_markers_and_unrelated_settings(tmp_path):
+    pyproject = tmp_path/'pyproject.toml'
+    pyproject.write_text('[project]\nname = "ws"\ndependencies = [\'My_Pkg[old]>=1; python_version >= "3.10"\', "other[keep]"]\n'
+        '[tool.uv.sources]\nMy_Pkg = { path = "../somewhere", editable = true }\n')
+    for extras in ({'dev', 'test'}, set()):
+        core._sync_ws_pyproject(pyproject, tmp_path/'pyproject.tmpl', ['my-pkg'], extras={'my-pkg': extras})
+        data = core.tomllib.loads(pyproject.read_text())
+        dep, other = data['project']['dependencies']
+        req = core.Requirement(dep)
+        assert req.extras == extras and str(req.specifier) == '>=1' and str(req.marker) == 'python_version >= "3.10"'
+        assert other == 'other[keep]' and len(data['project']['dependencies']) == 2
+        assert data['tool']['uv']['sources'] == {'My_Pkg': {'path': '../somewhere', 'editable': True}}
+        before = pyproject.stat().st_mtime_ns
+        core._sync_ws_pyproject(pyproject, tmp_path/'pyproject.tmpl', ['my-pkg'], extras={'my-pkg': extras})
+        assert pyproject.stat().st_mtime_ns == before
+
+
 def test_ws_excludes_generates_from_intent_and_auto(tmp_path):
     pyproject = tmp_path/'pyproject.toml'
     pyproject.write_text(
@@ -205,6 +232,13 @@ def test_external_projects_discovers_root_and_subdir_packages(tmp_path):
         (multi/name/'pyproject.toml').write_text(f'[project]\nname = "{pkg}"\n')
 
     assert core._external_projects(root, [single, multi, tmp_path/'missing']) == [('singlepkg', '../single'), ('tool1', '../multi/tool1')]
+    (root/'repos.txt').write_text(f'org/single[dev] {single}\norg/multi[docs] {multi}\n')
+    extras = core._repo_extras(root, core._load_repo_entries(root/'repos.txt', root))
+    assert extras == {'singlepkg': {'dev'}, 'tool1': {'docs'}}
+    core._sync_ws_pyproject(root/'pyproject.toml', root/'pyproject.tmpl', [], core._external_projects(root, [single, multi]), extras)
+    data = core.tomllib.loads((root/'pyproject.toml').read_text())
+    assert data['project']['dependencies'] == ['singlepkg[dev]', 'tool1[docs]']
+    assert data['tool']['uv']['sources']['tool1'] == {'path': '../multi/tool1', 'editable': True}
 
 
 @pytest.mark.parametrize('manifest', ['pyproject.toml', 'Cargo.toml', 'package.json'])

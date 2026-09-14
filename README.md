@@ -57,13 +57,24 @@ AnswerDotAI/fastcore
 jph00/private ~/private
 ```
 
+Select Python extras by attaching brackets to the repo name, before any checkout location:
+
+```text
+AnswerDotAI/fastws[dev]
+owner/repo[dev,test] ~/somewhere
+```
+
+These select `[project.optional-dependencies]`, not `[dependency-groups]`. Sync uses the package name from `pyproject.toml`, so `AnswerDotAI/fastws[dev]` installs `fastws-cli[dev]` editably. For a checkout containing several discovered Python packages, the selection applies to each. uv handles the extras and their dependencies.
+
+Extras from duplicate entries in `repos.txt` and `repos-local.txt` are combined. For example, a personal `AnswerDotAI/fastws[dev]` entry adds development extras to a shared `AnswerDotAI/fastws` entry. The lists are authoritative for those packages' extras: each sync updates existing workspace dependencies, including removing extras no longer selected. Put personal extra selections in `repos-local.txt`, not the generated `pyproject.toml`. Existing version constraints, markers, sources, and unrelated dependencies are preserved.
+
 ### Shared baseline and personal additions
 
 Keep `repos.txt` tracked in the workspace Git repo. Put personal additions in a gitignored `repos-local.txt`, using the same format. Every command reads both lists. `ws-add` and automatic discovery append only to the local list. Edit the shared list deliberately when changing the team's baseline. Duplicate repo names are matched case-insensitively. Conflicting explicit locations, or two different repos targeting the same directory, cause errors.
 
 `--repos-file myrepos.txt` uses `myrepos-local.txt` alongside it. Either list may be absent. Removing a repo from the baseline does not delete its checkout. The next sync discovers an existing root checkout as a personal addition. External checkouts also remain on disk; add them to the local list to keep managing them.
 
-The workspace `pyproject.toml` is local generated state. `ws-sync` creates it from the tracked `pyproject.tmpl` when available, or generates a minimal one, then maintains it without replacing personal settings. The template supplies starting defaults only: later template edits do not overwrite existing configuration. Ignore these files in the workspace repo (not in its member repos):
+The workspace `pyproject.toml` is local generated state. `ws-sync` creates it from the tracked `pyproject.tmpl` when available, or generates a minimal one, then maintains it while preserving personal settings except for the repo extras managed above. The template supplies starting defaults only: later template edits do not overwrite existing configuration. Ignore these files in the workspace repo (not in its member repos):
 
 ```gitignore
 /repos-local.txt
