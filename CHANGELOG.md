@@ -1,5 +1,12 @@
 <!-- do not remove -->
 
+## 0.0.16
+
+### New Features
+
+- Support optional-dependency extras in repos.txt entries, unioned across shared and local lists and synced into workspace dependencies ([#35](https://github.com/AnswerDotAI/fastws/issues/35))
+
+
 ## 0.0.15
 
 ### New Features
