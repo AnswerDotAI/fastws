@@ -191,7 +191,7 @@ Each sync regenerates Cargo overrides in the workspace's `.cargo/config.toml`. `
 
 Do not commit a `Cargo.lock` generated under these patches. Its source-less local entries cannot be resolved on another machine.
 
-When `sccache` is installed, sync also configures it as Cargo's `rustc-wrapper`, allowing unchanged compilation units to be reused across the workspace's otherwise-independent Cargo target directories. An existing wrapper is always preserved.
+When `sccache` is installed, sync also configures it as Cargo's `rustc-wrapper`, allowing unchanged compilation units to be reused across the workspace's otherwise-independent Cargo target directories. An existing wrapper is always preserved. If neither a wrapper nor `sccache` is present, sync warns with the install command (`cargo install sccache --locked`) and continues; rerun `ws-sync` after installing to enable it.
 
 Fastws discovers JavaScript packages directly under the workspace root. It reads each package's `workspaces` list for declared nested packages. These lists accept paths and globs. Fastws ignores undeclared nested packages. Lockfiles do not affect discovery. `[tool.fastws].exclude` matches paths relative to the workspace root. Fastws skips `node_modules` and directories whose names start with `.` or `_`.
 

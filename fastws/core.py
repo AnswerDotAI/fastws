@@ -694,11 +694,14 @@ def _sync_cargo_patches(root: Path) -> tuple[list[str], list[str]]:
 
 def _sync_cargo_wrapper(root: Path) -> bool:
     "Add sccache to the generated Cargo config when installed, without overriding another wrapper"
-    if not (wrapper := shutil.which("sccache")): return False
     config = root/".cargo"/"config.toml"
     content = config.read_text() if config.exists() else ""
     data = tomllib.loads(content) if content else {}
     if data.get("build", {}).get("rustc-wrapper"): return False
+    if not (wrapper := shutil.which("sccache")):
+        print("⚠️  sccache not found; Rust builds won't use compiler caching.\n"
+              "Install it with: cargo install sccache --locked\nThen rerun ws-sync to enable it.")
+        return False
     line = f'rustc-wrapper = {json.dumps(wrapper)}\n'
     if match := re.search(r"(?m)^\[build\][^\n]*\n", content): new = content[:match.end()] + line + content[match.end():]
     else: new = content.rstrip() + ("\n\n" if content.strip() else "") + "[build]\n" + line
@@ -839,7 +842,13 @@ def _npm_install(root: Path):
 def _sync_js(root: Path, members: list[Path]) -> list[Path]:
     "Install the JS workspace, run every native member's build script, and return those members. Cargo handles incremental compilation."
     tool = _fastws_cfg(root).get("js", "npm")
-    if not shutil.which(tool): raise SystemExit(f"{tool} is not installed: install it, or set [tool.fastws].js to a package manager that is")
+    if not shutil.which(tool):
+        msg = f"{tool} is not installed: install it, or set [tool.fastws].js to a package manager that is"
+        if tool == "npm": msg += ("\n\nInstall Node.js and npm using nvm:\n"
+            "curl -fsSL https://raw.githubusercontent.com/nvm-sh/nvm/master/install.sh | bash\n"
+            "# Restart your terminal, then:\n"
+            "nvm install --lts")
+        raise SystemExit(msg)
     if tool == "npm": _npm_install(root)
     else: subprocess.run([tool, "install"], check=True, cwd=root)
     built = _native_js(members)

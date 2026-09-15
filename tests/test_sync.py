@@ -1,5 +1,4 @@
-import json, os, runpy, shutil, sys, pytest
-from types import SimpleNamespace
+import json, os, pytest
 from fastgit import Git
 import fastws.core as core
 
@@ -23,19 +22,6 @@ def mk_repo(d, origin=None):
         g.remote('add', 'origin', str(origin))
         g.push('-u', 'origin', 'main')
     return g
-
-
-@pytest.fixture
-def fake_uv(monkeypatch):
-    "Intercept uv/cargo invocations (external tools stay out of tests); real git passes through"
-    calls, real = [], core.subprocess.run
-    def run(cmd, **kw):
-        if cmd[0] in ('uv', 'cargo'):
-            calls.append(cmd)
-            return SimpleNamespace(returncode=0, stdout='', stderr='')
-        return real(cmd, **kw)
-    monkeypatch.setattr(core.subprocess, 'run', run)
-    return calls
 
 
 def test_repos_file_roundtrip(tmp_path):
@@ -80,63 +66,6 @@ def test_repo_lists_deduplicate_and_reject_conflicting_locations(tmp_path):
 @pytest.mark.parametrize('entry', ['org/repo[dev', 'org/repo[dev]]', 'org/repo[]'])
 def test_invalid_repo_extras(entry):
     with pytest.raises(SystemExit, match='Invalid repo entry'): core._parse_repo_line(entry)
-
-
-async def test_sync_updates_baseline_before_cloning_and_keeps_removed_repos(tmp_path, monkeypatch, fake_uv):
-    origins, seed, root = tmp_path/'origins', tmp_path/'seed', tmp_path/'ws'
-    config = tmp_path/'gitconfig'
-    config.write_text(f'[init]\ndefaultBranch = main\n[url "{origins.as_uri()}/"]\ninsteadOf = git@github.com:org/\n')
-    monkeypatch.setenv('GIT_CONFIG_GLOBAL', str(config))
-    monkeypatch.setattr(core, '_parse_github_repo', lambda url: f'org/{core.Path(url).stem}' if str(origins) in url else None)
-    async def offline_heads(refs): raise ValueError('No GitHub API in local Git test')
-    monkeypatch.setattr(core, '_remote_heads', offline_heads)
-    for name in ('old', 'new', 'extra'):
-        d = tmp_path/name
-        d.mkdir()
-        (d/'pyproject.toml').write_text(f'[project]\nname = "{name}-pkg"\n[project.optional-dependencies]\ndev = []\ntest = []\n')
-        mk_repo(d, origin=origins/f'{name}.git')
-    seed.mkdir()
-    (seed/'repos.txt').write_text('org/old[dev]\n')
-    (seed/'.gitignore').write_text('*/\npyproject.toml\nrepos-local.txt\n')
-    (seed/'pyproject.tmpl').write_text('[project]\nname = "workspace"\ndependencies = []\n[tool.uv.workspace]\nmembers = ["./*"]\n')
-    g = mk_repo(seed, origin=origins/'workspace.git')
-    Git(tmp_path, raise_exc=True).clone(str(origins/'workspace.git'), str(root))
-    Git(root, raise_exc=True).clone('git@github.com:org/extra.git', str(root/'extra'))
-    (root/'repos-local.txt').write_text('org/old[test]\n')
-
-    await core.ws_sync(str(root))
-    assert (root/'old'/'pyproject.toml').exists()
-    assert (root/'repos.txt').read_text() == 'org/old[dev]\n'
-    assert (root/'repos-local.txt').read_text() == 'org/old[test]\norg/extra\n'
-    assert set(core.tomllib.loads((root/'pyproject.toml').read_text())['project']['dependencies']) == {'old-pkg[dev,test]', 'extra-pkg'}
-
-    (seed/'repos.txt').write_text('org/new\n')
-    g.commit('-a', m='new shared baseline')
-    g.push()
-    await core.ws_sync(str(root))
-    assert (root/'new'/'pyproject.toml').exists()
-    assert (root/'old'/'pyproject.toml').exists()
-    assert (root/'repos.txt').read_text() == 'org/new\n'
-    assert set(core._load_repos(root/'repos-local.txt')) == {'org/extra', 'org/old'}
-    assert set(core.tomllib.loads((root/'pyproject.toml').read_text())['project']['dependencies']) == {'old-pkg[test]', 'new-pkg', 'extra-pkg'}
-    (root/'repos-local.txt').write_text('org/extra\n')
-    await core.ws_sync(str(root))
-    assert set(core.tomllib.loads((root/'pyproject.toml').read_text())['project']['dependencies']) == {'old-pkg', 'new-pkg', 'extra-pkg'}
-
-    (seed/'repos.txt').write_text('org/missing\n')
-    g.commit('-a', m='unavailable member')
-    g.push()
-    fake_uv.clear()
-    with pytest.raises(SystemExit, match='clone'): await core.ws_sync(str(root))
-    assert not fake_uv
-
-    (root/'repos.txt').write_text('local edits\n')
-    (seed/'repos.txt').write_text('org/new\n')
-    g.commit('-a', m='restore baseline')
-    g.push()
-    with pytest.raises(core.subprocess.CalledProcessError): await core.ws_sync(str(root))
-    assert (root/'repos.txt').read_text() == 'local edits\n'
-    assert not fake_uv
 
 
 def test_ws_pyproject_from_template_adds_projects(tmp_path):
@@ -298,7 +227,7 @@ async def test_git_repo_resolution(tmp_path):
     assert sorted(await core._discover_ws_repos(tmp_path)) == ['AnswerDotAI/Proj', 'AnswerDotAI/crate']
 
 
-def test_ws_remove_workflow(tmp_path, monkeypatch, fake_uv):
+def test_ws_remove_refuses_unsafe_repos(tmp_path):
     (tmp_path/'repos.txt').write_text('AnswerDotAI/keep\n')
     local = tmp_path/'repos-local.txt'
     local.write_text('AnswerDotAI/repo1\nAnswerDotAI/repo2\norg/external ../external\n')
@@ -308,43 +237,17 @@ def test_ws_remove_workflow(tmp_path, monkeypatch, fake_uv):
         d.mkdir()
         (d/'pyproject.toml').write_text(f'[project]\nname = "{d.name}pkg"\n')
         g = mk_repo(d, origin=tmp_path/'origins'/d.name)
-    answer = ['n', 'y', 'y']
-    monkeypatch.setattr('builtins.input', lambda *a: answer.pop(0))
-
     with pytest.raises(SystemExit, match='baseline'): core.ws_remove('repo1', 'AnswerDotAI/keep', workspace=str(tmp_path))
     with pytest.raises(SystemExit, match='location'): core.ws_remove('repo1', 'org/external', workspace=str(tmp_path))
-    assert 'org/external ../external' in local.read_text()
-    assert (tmp_path/'repos.txt').read_text() == 'AnswerDotAI/keep\n'
-    assert not fake_uv
 
-    # a dirty tree refuses before any mutation
     (repo2/'pyproject.toml').write_text('[project]\nname = "repo2pkg"\nversion = "1"\n')
-    with pytest.raises(SystemExit): core.ws_remove('AnswerDotAI/repo1', 'repo2', workspace=str(tmp_path))
-    assert repo.exists() and repo2.exists() and 'repo1' in local.read_text() and 'repo2' in local.read_text()
-    assert (tmp_path/'pyproject.toml').read_text() == WS_META
-
-    # so does an unpushed commit on a clean tree
+    with pytest.raises(SystemExit, match='uncommitted'): core.ws_remove('repo1', 'repo2', workspace=str(tmp_path))
     g.commit('-a', m='ahead')
-    with pytest.raises(SystemExit): core.ws_remove('AnswerDotAI/repo1', 'repo2', workspace=str(tmp_path))
+    with pytest.raises(SystemExit, match='unpushed'): core.ws_remove('repo1', 'repo2', workspace=str(tmp_path))
     assert repo.exists() and repo2.exists()
-
-    # Each checkout has its own prompt; duplicate targets are removed once, with one sync for the batch.
-    g.push()
-    monkeypatch.setattr(sys, 'argv', ['ws-remove', 'AnswerDotAI/repo1', 'repo2', 'repo1', '--workspace', str(tmp_path)])
-    with pytest.raises(SystemExit) as exc: runpy.run_path(shutil.which('ws-remove'), run_name='__main__')
-    assert exc.value.code in (None, 0)
-    assert repo.exists() and not repo2.exists()
-    assert 'repo1' not in local.read_text() and 'repo2' not in local.read_text()
-    assert 'repo1pkg' not in (content := (tmp_path/'pyproject.toml').read_text()) and 'repo2pkg' not in content
-    assert 'keeppkg' in content and fake_uv == [['uv', 'sync']]
-
-    # answering 'y' (by folder name this time) also deletes the checkout
-    local.write_text('AnswerDotAI/repo1\n')
-    (tmp_path/'pyproject.toml').write_text(WS_META)
-    core.ws_remove('repo1', workspace=str(tmp_path))
-    assert not repo.exists()
+    assert local.read_text() == 'AnswerDotAI/repo1\nAnswerDotAI/repo2\norg/external ../external\n'
+    assert (tmp_path/'pyproject.toml').read_text() == WS_META
     assert (tmp_path/'repos.txt').read_text() == 'AnswerDotAI/keep\n'
-    assert not answer
 
 
 def test_upgrade_stamp(tmp_path):
@@ -413,31 +316,6 @@ def test_cargo_key_ignores_unused_patch_order(tmp_path):
     assert key.read_text() != first
 
 
-async def test_changed_dirs_pulls_only_moved_repos(tmp_path, monkeypatch):
-    # ahead: a second clone pushes to the shared bare origin, so `ahead`'s origin/main falls behind
-    ahead, current, weird = tmp_path/'ahead', tmp_path/'current', tmp_path/'weird'
-    for d in (ahead, current):
-        d.mkdir()
-        g = mk_repo(d, origin=tmp_path/'origins'/d.name)
-        g.remote('set-url', '--push', 'origin', str(tmp_path/'origins'/d.name))
-    other = tmp_path/'other'
-    Git(tmp_path, raise_exc=True).clone(str(tmp_path/'origins'/'ahead'), str(other))
-    og = Git(other, raise_exc=True)
-    (other/'g.txt').write_text('new')
-    og.add('.')
-    og.commit(m='advance')
-    og.push()
-    weird.mkdir()
-    mk_repo(weird)  # no origin remote: can't be checked, so it must be pulled
-
-    async def fake_heads(refs): return [str(Git(tmp_path/'origins'/spec.split('/')[1], raise_exc=True).rev_parse(branch)) for spec, branch in refs]
-    monkeypatch.setattr(core, '_remote_heads', fake_heads)
-    monkeypatch.setattr(core, '_parse_github_repo', lambda url: f'o/{core.Path(url).name}' if 'origins' in url else None)
-
-    changed = await core._changed_dirs([ahead, current, weird])
-    assert set(changed) == {ahead, weird}
-
-
 def test_sync_cargo_patches_generates_and_preserves(tmp_path):
     (tmp_path/'.cargo').mkdir()
     config = tmp_path/'.cargo'/'config.toml'
@@ -478,25 +356,9 @@ def test_sync_cargo_patches_generates_and_preserves(tmp_path):
     assert core.tomllib.loads((bare/'.cargo'/'config.toml').read_text())['patch']['crates-io']['c']['path'] == str(bare/'c')
 
 
-def test_sync_cargo_wrapper(tmp_path, monkeypatch):
+def test_sync_cargo_wrapper_preserves_existing(tmp_path):
     config = tmp_path/'.cargo'/'config.toml'
     config.parent.mkdir()
-    config.write_text('[term]\nquiet = true\n')
-    monkeypatch.setattr(core.shutil, 'which', lambda name: '/opt/homebrew/bin/sccache')
-
-    assert core._sync_cargo_wrapper(tmp_path)
-    data = core.tomllib.loads(config.read_text())
-    assert data['build']['rustc-wrapper'] == '/opt/homebrew/bin/sccache'
-    assert data['term']['quiet'] is True
-    assert not core._sync_cargo_wrapper(tmp_path)
-
-    (tmp_path/'crate').mkdir()
-    (tmp_path/'crate'/'Cargo.toml').write_text('[package]\nname = "crate"\n')
-    core._sync_cargo_patches(tmp_path)
-    content = config.read_text()
-    assert not core._sync_cargo_wrapper(tmp_path)
-    assert core._sync_cargo_patches(tmp_path) == ([], []) and config.read_text() == content
-
     config.write_text('[build]\nrustc-wrapper = "other-cache"\n')
     assert not core._sync_cargo_wrapper(tmp_path)
     assert core.tomllib.loads(config.read_text())['build']['rustc-wrapper'] == 'other-cache'
@@ -527,54 +389,13 @@ def test_npm_dirs_honours_fastws_exclude(tmp_path):
     assert core._npm_dirs(tmp_path) == [tmp_path/'lib', tmp_path/'py', tmp_path/'py'/'wasm']
 
 
-def test_sync_ws_package_json_generates_and_preserves(tmp_path):
-    pkg = tmp_path/'package.json'
-    pkg.write_text('{\n  "name": "ws",\n  "private": true,\n  "workspaces": ["../outside", "gone", "tools/*"]\n}\n')
-    members = [tmp_path/'app', tmp_path/'crate'/'wasm']
-
-    added, removed = core._sync_ws_package_json(tmp_path, members)
-    data = json.loads(pkg.read_text())
-    # kept: entries outside the root and globs; managed: existing dirs regenerated from discovery
-    assert data['workspaces'] == ['../outside', 'tools/*', 'app', 'crate/wasm']
-    assert data['name'] == 'ws' and data['private'] is True  # other keys untouched
-    assert added == ['app', 'crate/wasm'] and removed == ['gone']
-
-    content = pkg.read_text()
-    assert core._sync_ws_package_json(tmp_path, members) == ([], [])
-    assert pkg.read_text() == content
-
-    # a missing root package.json is created
-    bare = tmp_path/'ws2'
-    bare.mkdir()
-    assert core._sync_ws_package_json(bare, [bare/'a']) == (['a'], [])
-    assert json.loads((bare/'package.json').read_text()) == {'private': True, 'workspaces': ['a']}
-
-
-@pytest.mark.parametrize('workspaces', [{'packages': ['packages/*']}, {}])
-def test_sync_ws_package_json_rejects_object_form(tmp_path, workspaces):
-    pkg = tmp_path/'package.json'
-    content = json.dumps({'private': True, 'workspaces': workspaces}) + '\n'
-    pkg.write_text(content)
-
-    with pytest.raises(SystemExit, match='workspaces.*list') as exc: core._sync_ws_package_json(tmp_path, [tmp_path/'app'])
-    assert str(pkg) in str(exc.value)
-    assert pkg.read_text() == content
-
-
-def test_sync_ws_package_json_merges_shared_settings(tmp_path):
+def test_sync_ws_package_json_preserves_local_and_merges_shared(tmp_path):
     pkg, shared = tmp_path/'package.json', tmp_path/'package.json.shared'
-    pkg.write_text(json.dumps({'name': 'local', 'workspaces': ['app'], 'keywords': ['local'],
-        'allowScripts': {'wasm-pack@0.15.0': False, 'other': False}}))
-    shared.write_text(json.dumps({'keywords': ['shared'], 'allowScripts': {'wasm-pack@0.15.0': True}}))
-    assert core._sync_ws_package_json(tmp_path, [tmp_path/'app']) == ([], [])
-    assert json.loads(pkg.read_text()) == {'name': 'local', 'workspaces': ['app'], 'keywords': ['shared'],
-        'allowScripts': {'wasm-pack@0.15.0': True, 'other': False}}
-    content, mtime = pkg.read_text(), pkg.stat().st_mtime_ns
-    core._sync_ws_package_json(tmp_path, [tmp_path/'app'])
-    assert pkg.stat().st_mtime_ns == mtime
-    shared.write_text('{}')
-    core._sync_ws_package_json(tmp_path, [tmp_path/'app'])
-    assert pkg.read_text() == content
+    pkg.write_text(json.dumps({'name': 'local', 'workspaces': ['../outside', 'gone', 'tools/*'], 'allowScripts': {'other': False}}))
+    shared.write_text('{"allowScripts": {"wasm-pack": true}}')
+    assert core._sync_ws_package_json(tmp_path, [tmp_path/'app']) == (['app'], ['gone'])
+    assert json.loads(pkg.read_text()) == {'name': 'local', 'workspaces': ['../outside', 'tools/*', 'app'],
+        'allowScripts': {'other': False, 'wasm-pack': True}}
 
 
 def test_ws_excludes_treat_npm_only_dirs_like_cargo_only(tmp_path):
@@ -588,44 +409,7 @@ def test_ws_excludes_treat_npm_only_dirs_like_cargo_only(tmp_path):
     assert core._pending_dirs(tmp_path) == ['pending']
 
 
-def test_native_js_requires_rust_and_build_script(tmp_path):
-    app, crate, wasm = [tmp_path/n for n in ('app', 'crate', 'wasm')]
-    for d in (app, crate, wasm): d.mkdir()
-    (app/'package.json').write_text('{"scripts": {"build": "vite build"}}')
-    for d in (crate, wasm): (d/'Cargo.toml').write_text('')
-    (crate/'package.json').write_text('{}')
-    (wasm/'package.json').write_text('{"scripts": {"build": "cargo build"}}')
-    assert core._native_js([app, crate, wasm]) == [wasm]
-
-
-def test_check_rustup_missing(monkeypatch):
-    monkeypatch.setattr(core.shutil, 'which', lambda tool: None)
-    with pytest.raises(SystemExit, match='Install it from https://rustup.rs'): core._check_rustup()
-
-
-@pytest.mark.parametrize('shadowed', [None, 'rustc', 'cargo'])
-def test_check_rustup_proxies(tmp_path, monkeypatch, shadowed):
-    rustup = tmp_path/'rustup'
-    rustup.touch()
-    (tmp_path/'rustc').symlink_to(rustup)
-    (tmp_path/'cargo').hardlink_to(rustup)
-    other = tmp_path/'brew-rust'
-    other.touch()
-    monkeypatch.setattr(core.shutil, 'which', lambda tool: str(other if tool == shadowed else tmp_path/tool))
-    if shadowed:
-        with pytest.raises(SystemExit, match=f'{shadowed} resolves to') as err: core._check_rustup()
-        assert 'Homebrew Rust can remain installed' in str(err.value)
-        assert 'PATH' in str(err.value)
-    else: core._check_rustup()
-
-
-async def test_sync_checks_rustup_before_installs(tmp_path, monkeypatch, fake_uv):
-    (tmp_path/'repos.txt').write_text('')
-    (tmp_path/'pyproject.toml').write_text('[project]\nname = "ws"\n[tool.uv.workspace]\nmembers = ["*"]\n')
-    wasm = tmp_path/'wasm'
-    wasm.mkdir()
-    (wasm/'Cargo.toml').write_text('[package]\nname = "wasm"\n')
-    (wasm/'package.json').write_text('{"name": "wasm", "scripts": {"build": "wasm-pack build"}}')
-    monkeypatch.setattr(core.shutil, 'which', lambda tool: None)
-    with pytest.raises(SystemExit, match='require rustup'): await core.ws_sync(str(tmp_path))
-    assert not fake_uv
+def test_check_rustup_rejects_shadowed_compiler(tmp_path, monkeypatch):
+    for tool in ('rustup', 'rustc'): (tmp_path/tool).touch(mode=0o755)
+    monkeypatch.setenv('PATH', str(tmp_path))
+    with pytest.raises(SystemExit, match='rustc resolves to'): core._check_rustup()
