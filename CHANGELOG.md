@@ -1,5 +1,12 @@
 <!-- do not remove -->
 
+## 0.0.17
+
+### New Features
+
+- ws-remove: accept multiple repos, validate all targets up front, prompt per checkout, and run a single uv sync for the batch ([#36](https://github.com/AnswerDotAI/fastws/issues/36))
+
+
 ## 0.0.16
 
 ### New Features
