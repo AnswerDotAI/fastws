@@ -1,4 +1,4 @@
-import json, os, pytest
+import json, os, runpy, shutil, sys, pytest
 from types import SimpleNamespace
 from fastgit import Git
 import fastws.core as core
@@ -6,7 +6,7 @@ import fastws.core as core
 os.environ.update(GIT_AUTHOR_NAME='fastws', GIT_AUTHOR_EMAIL='fastws@example.com',
     GIT_COMMITTER_NAME='fastws', GIT_COMMITTER_EMAIL='fastws@example.com')
 
-WS_META = '[project]\nname = "uvws"\ndependencies = [\n    "repo1pkg",\n    "keeppkg",\n]\n\n[tool.uv.sources]\nrepo1pkg = { workspace = true }\nkeeppkg = { workspace = true }\n'
+WS_META = '[project]\nname = "uvws"\ndependencies = [\n    "repo1pkg",\n    "repo2pkg",\n    "keeppkg",\n]\n\n[tool.uv.sources]\nrepo1pkg = { workspace = true }\nrepo2pkg = { workspace = true }\nkeeppkg = { workspace = true }\n'
 
 
 def mk_repo(d, origin=None):
@@ -301,47 +301,50 @@ async def test_git_repo_resolution(tmp_path):
 def test_ws_remove_workflow(tmp_path, monkeypatch, fake_uv):
     (tmp_path/'repos.txt').write_text('AnswerDotAI/keep\n')
     local = tmp_path/'repos-local.txt'
-    local.write_text('AnswerDotAI/repo1\norg/external ../external\n')
+    local.write_text('AnswerDotAI/repo1\nAnswerDotAI/repo2\norg/external ../external\n')
     (tmp_path/'pyproject.toml').write_text(WS_META)
-    repo = tmp_path/'repo1'
-    repo.mkdir()
-    (repo/'pyproject.toml').write_text('[project]\nname = "repo1pkg"\n')
-    g = mk_repo(repo, origin=tmp_path/'origins'/'repo1')
-    answer = ['y']
-    monkeypatch.setattr('builtins.input', lambda *a: answer[0])
+    repo, repo2 = tmp_path/'repo1', tmp_path/'repo2'
+    for d in repo, repo2:
+        d.mkdir()
+        (d/'pyproject.toml').write_text(f'[project]\nname = "{d.name}pkg"\n')
+        g = mk_repo(d, origin=tmp_path/'origins'/d.name)
+    answer = ['n', 'y', 'y']
+    monkeypatch.setattr('builtins.input', lambda *a: answer.pop(0))
 
-    with pytest.raises(SystemExit, match='baseline'): core.ws_remove('AnswerDotAI/keep', workspace=str(tmp_path))
-    with pytest.raises(SystemExit, match='location'): core.ws_remove('org/external', workspace=str(tmp_path))
+    with pytest.raises(SystemExit, match='baseline'): core.ws_remove('repo1', 'AnswerDotAI/keep', workspace=str(tmp_path))
+    with pytest.raises(SystemExit, match='location'): core.ws_remove('repo1', 'org/external', workspace=str(tmp_path))
     assert 'org/external ../external' in local.read_text()
     assert (tmp_path/'repos.txt').read_text() == 'AnswerDotAI/keep\n'
     assert not fake_uv
 
     # a dirty tree refuses before any mutation
-    (repo/'pyproject.toml').write_text('[project]\nname = "repo1pkg"\nversion = "1"\n')
-    with pytest.raises(SystemExit): core.ws_remove('AnswerDotAI/repo1', workspace=str(tmp_path))
-    assert repo.exists() and 'repo1' in local.read_text()
+    (repo2/'pyproject.toml').write_text('[project]\nname = "repo2pkg"\nversion = "1"\n')
+    with pytest.raises(SystemExit): core.ws_remove('AnswerDotAI/repo1', 'repo2', workspace=str(tmp_path))
+    assert repo.exists() and repo2.exists() and 'repo1' in local.read_text() and 'repo2' in local.read_text()
+    assert (tmp_path/'pyproject.toml').read_text() == WS_META
 
     # so does an unpushed commit on a clean tree
     g.commit('-a', m='ahead')
-    with pytest.raises(SystemExit): core.ws_remove('AnswerDotAI/repo1', workspace=str(tmp_path))
-    assert repo.exists()
+    with pytest.raises(SystemExit): core.ws_remove('AnswerDotAI/repo1', 'repo2', workspace=str(tmp_path))
+    assert repo.exists() and repo2.exists()
 
-    # pushed and clean: answering 'n' keeps the directory but still removes the metadata and re-syncs
+    # Each checkout has its own prompt; duplicate targets are removed once, with one sync for the batch.
     g.push()
-    answer[0] = 'n'
-    core.ws_remove('AnswerDotAI/repo1', workspace=str(tmp_path))
-    assert repo.exists()
-    assert 'repo1' not in local.read_text()
-    assert 'repo1pkg' not in (tmp_path/'pyproject.toml').read_text()
-    assert ['uv', 'sync'] in fake_uv
+    monkeypatch.setattr(sys, 'argv', ['ws-remove', 'AnswerDotAI/repo1', 'repo2', 'repo1', '--workspace', str(tmp_path)])
+    with pytest.raises(SystemExit) as exc: runpy.run_path(shutil.which('ws-remove'), run_name='__main__')
+    assert exc.value.code in (None, 0)
+    assert repo.exists() and not repo2.exists()
+    assert 'repo1' not in local.read_text() and 'repo2' not in local.read_text()
+    assert 'repo1pkg' not in (content := (tmp_path/'pyproject.toml').read_text()) and 'repo2pkg' not in content
+    assert 'keeppkg' in content and fake_uv == [['uv', 'sync']]
 
     # answering 'y' (by folder name this time) also deletes the checkout
     local.write_text('AnswerDotAI/repo1\n')
     (tmp_path/'pyproject.toml').write_text(WS_META)
-    answer[0] = 'y'
     core.ws_remove('repo1', workspace=str(tmp_path))
     assert not repo.exists()
     assert (tmp_path/'repos.txt').read_text() == 'AnswerDotAI/keep\n'
+    assert not answer
 
 
 def test_upgrade_stamp(tmp_path):

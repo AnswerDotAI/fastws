@@ -984,33 +984,41 @@ def _repo_safety_issues(d: Path) -> list[str]:
 
 @call_parse
 def ws_remove(
-    repo: str,  # Repo to remove, e.g. AnswerDotAI/fastws
+    repo: str,  # Repo to remove, e.g. owner/repo or a local folder name
+    *repos: str,  # Additional repos to remove
     workspace: str = "",  # Workspace root; defaults to active venv parent when available
     repos_file: str = "repos.txt",  # Repo list to update
     pyproject_file: str = "pyproject.toml",  # Workspace pyproject to update
     template_file: str = "pyproject.tmpl",  # Template copied when pyproject.toml is missing
 ):
-    "Remove a personal repo and its local metadata; shared baseline members cannot be removed."
+    "Remove personal repos and their local metadata; shared baseline members cannot be removed."
     root = _ws_root(workspace, repos_file, pyproject_file, template_file)
     repos_path = _resolve_path(root, repos_file)
     pyproject_path = _resolve_path(root, pyproject_file)
-    repo = _resolve_removal_target(root, repo, repos_path)
-    if _repo_key(repo) in {_repo_key(r) for r in _load_repos(repos_path)}:
-        raise SystemExit(f'{repo} belongs to the shared baseline: edit {repos_path} deliberately to remove it')
-    d = _resolve_repo_dir(root, repo)
-    for r,location,_ in _load_repo_entries(repos_path, root):
-        if _repo_key(r) == _repo_key(repo) and location.resolve() != d:
-            raise SystemExit(f'Refusing to remove {repo}: custom checkout location {location}; manage it explicitly')
-    repos_path = _local_repos_path(repos_path)
-    name = _read_pyproject_name(d/"pyproject.toml") if (d/"pyproject.toml").exists() else None
-    names = [name] if name else [d.name]
-    in_repos = _repo_key(repo) in {_repo_key(r) for r in _load_repos(repos_path)}
-    if not d.exists() and not in_repos: raise SystemExit(f"Nothing to remove for {repo}")
-    if d.exists() and (issues := _repo_safety_issues(d)): raise SystemExit("Refusing to remove:\n" + "\n".join(f"  - {i}" for i in issues))
-    _remove_from_repos_file(repos_path, repo)
-    _remove_from_pyproject(pyproject_path, names)
-    if d.exists():
-        try: ans = input(f"Remove directory {d}? [y/N] ")
-        except EOFError: ans = ""
-        if ans.strip().lower() in ("y", "yes"): shutil.rmtree(d)
+    local_path = _local_repos_path(repos_path)
+    baseline = {_repo_key(r) for r in _load_repos(repos_path)}
+    local = {_repo_key(r) for r in _load_repos(local_path)}
+    entries = _load_repo_entries(repos_path, root)
+    targets = {}
+    for repo in (repo, *repos):
+        repo = _resolve_removal_target(root, repo, repos_path)
+        key = _repo_key(repo)
+        if key in baseline: raise SystemExit(f'{repo} belongs to the shared baseline: edit {repos_path} deliberately to remove it')
+        d = _resolve_repo_dir(root, repo)
+        for r,location,_ in entries:
+            if _repo_key(r) == key and location.resolve() != d:
+                raise SystemExit(f'Refusing to remove {repo}: custom checkout location {location}; manage it explicitly')
+        if d in targets: continue
+        if not d.exists() and key not in local: raise SystemExit(f"Nothing to remove for {repo}")
+        if d.exists() and (issues := _repo_safety_issues(d)):
+            raise SystemExit("Refusing to remove:\n" + "\n".join(f"  - {i}" for i in issues))
+        name = _read_pyproject_name(d/"pyproject.toml") if (d/"pyproject.toml").exists() else None
+        targets[d] = repo, name or d.name
+    for d,(repo,name) in targets.items():
+        _remove_from_repos_file(local_path, repo)
+        _remove_from_pyproject(pyproject_path, [name])
+        if d.exists():
+            try: ans = input(f"Remove directory {d}? [y/N] ")
+            except EOFError: ans = ""
+            if ans.strip().lower() in ("y", "yes"): shutil.rmtree(d)
     subprocess.run(["uv", "sync"], check=True, cwd=root)

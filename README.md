@@ -236,15 +236,16 @@ ws-add ~/private  # stays where it is, recorded in repos-local.txt with its loca
 
 ### `ws-remove`
 
-Delete a personal repo's clone, remove it from `repos-local.txt` and the workspace `pyproject.toml`, then run `uv sync`.
+Delete one or more personal repo clones and remove them from `repos-local.txt` and the workspace `pyproject.toml`. Run `uv sync` once after processing all repos.
 
 The command refuses shared baseline members. Edit `repos.txt` deliberately to change the team's baseline. It also refuses external or custom checkout locations, which must be managed explicitly.
 
-Removal requires a clean Git checkout with an `origin` remote and no uncommitted changes or unpushed commits. The command always asks for confirmation before deleting anything:
+Removal requires a clean Git checkout with an `origin` remote and no uncommitted changes or unpushed commits. The command validates all targets before changing anything. It asks for confirmation before deleting each checkout. Declining keeps that checkout but still removes its workspace metadata. Repeated targets are processed once:
 
 ```bash
 ws-remove owner/personal-project
 ws-remove personal-project  # bare folder name also works if the directory exists
+ws-remove owner/project-one project-two project-three
 ```
 
 ### `ws-releases`
