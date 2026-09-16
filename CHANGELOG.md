@@ -1,5 +1,12 @@
 <!-- do not remove -->
 
+## 0.0.18
+
+### New Features
+
+- Add install guidance when sccache or npm is missing: warn and continue without caching, or fail with nvm-based Node setup steps ([#37](https://github.com/AnswerDotAI/fastws/issues/37))
+
+
 ## 0.0.17
 
 ### New Features
