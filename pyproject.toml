@@ -16,7 +16,7 @@ classifiers = [
 ]
 
 dependencies = [
-  "fastcore>=2.2.29",
+  "fastcore>=2.2.28",
   "fastgit>=0.1.2",
   "ghapi>=2.0.6",
   "packaging",
