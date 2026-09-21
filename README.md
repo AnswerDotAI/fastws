@@ -183,7 +183,7 @@ By default, `ws-sync` uses the active venv's parent as the workspace root. It cr
 
 Project scanning respects `tool.uv.workspace.members` and `exclude`. If a member directory lacks `pyproject.toml`, such as a fresh empty clone, sync warns and skips the `uv sync` step.
 
-Fastws maintains `tool.uv.workspace.exclude`. It excludes unlisted top-level directories without a valid Python project. It also excludes listed Rust or JavaScript projects without `pyproject.toml`. For a listed checkout with none of `pyproject.toml`, `Cargo.toml`, or `package.json`, sync warns and skips installation.
+Fastws maintains `tool.uv.workspace.exclude`. It excludes unlisted top-level directories without a valid Python project. It also excludes listed Rust or JavaScript projects without `pyproject.toml`. It also excludes listed project templates, whose `[project].name` still holds a `{placeholder}`, because uv cannot parse that name. For a listed checkout with none of `pyproject.toml`, `Cargo.toml`, or `package.json`, sync warns and skips installation.
 
 Existing globs, entries for missing directories, and entries for checkouts that are still not Python projects are retained. Use `exclude = [...]` under `[tool.fastws]` to specify exclusions the scan cannot infer, such as keeping a valid project out of the workspace. Adding members preserves hand-written `[tool.uv.sources]` entries, including path and Git sources.
 

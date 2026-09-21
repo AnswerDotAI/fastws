@@ -176,13 +176,21 @@ def _remove_from_pyproject(pyproject_path: Path, names: list[str]) -> list[str]:
     pyproject_path.write_text(content)
     return removed
 
-def _read_pyproject_name(path: Path) -> str|None:
+def _pyproject_name(path: Path) -> str|None:
+    "`[project].name` as written, with any `{placeholder}` slots left in"
     try: data = tomllib.loads(path.read_text())
     except tomllib.TOMLDecodeError:
         print(f"Skipping invalid TOML: {path}")
         return None
     name = data.get("project", {}).get("name")
-    return name if isinstance(name, str) and name and "{" not in name and "}" not in name else None
+    return name if isinstance(name, str) and name else None
+
+def _is_placeholder(name: str|None) -> bool: return bool(name) and ("{" in name or "}" in name)
+
+def _read_pyproject_name(path: Path) -> str|None:
+    "`[project].name`, or None when it is missing or still a template placeholder"
+    name = _pyproject_name(path)
+    return None if _is_placeholder(name) else name
 
 def _ws_projects(root: Path) -> list[str]:
     return [name for d in (o for o in _ws_dirs(root) if (o/"pyproject.toml").exists())
@@ -208,6 +216,10 @@ def _non_python_project(d: Path) -> bool:
     "A Rust or JS project without a Python layer is not a pending Python scaffold."
     return not (d/"pyproject.toml").exists() and any((d/f).exists() for f in ("Cargo.toml", "package.json"))
 
+def _template_dir(d: Path) -> bool:
+    "A project template. Its `[project].name` still holds `{placeholder}` slots, so uv cannot parse it."
+    return (d/"pyproject.toml").exists() and _is_placeholder(_pyproject_name(d/"pyproject.toml"))
+
 def _pending_dirs(root: Path) -> list[str]:
     "uv workspace dirs that are not Python projects yet; sync stops rather than let uv fail on them"
     return [d.name for d in _ws_dirs(root) if not (d/"pyproject.toml").exists()]
@@ -218,7 +230,7 @@ def _sync_ws_excludes(pyproject_path: Path, root: Path, tracked: set[str]) -> tu
     Kept as-is: `[tool.fastws].exclude` entries (intent), globs, missing dirs, and tracked dirs
     (repos.txt checkouts) that are still not valid Python projects. Auto-managed: entries for other
     existing dirs are regenerated each sync, excluding dirs without a valid pyproject (tracked dirs
-    only when they are Cargo-only crates or npm-only packages, since a tracked dir with none of those files is a pending member
+    only when they are Cargo-only crates, npm-only packages, or templates with a `{placeholder}` name, since a tracked dir with none of those files is a pending member
     awaiting scaffolding) and un-excluding dirs that gained one; deliberately excluding a real
     project takes a `[tool.fastws]` entry."""
     if not pyproject_path.exists(): return [], []
@@ -231,7 +243,7 @@ def _sync_ws_excludes(pyproject_path: Path, root: Path, tracked: set[str]) -> tu
     kept = [e for e in cur if e in intent or any(c in e for c in "*?[") or not (root/e).is_dir() or (e in tracked and not _valid_project_dir(root/e))]
     kept += [e for e in intent if e not in kept]
     auto = [d.name for d in _project_dirs(root, exclude=kept) if not d.name.startswith(".") and any(_matches_ws(d.name, m) for m in members)
-        and (d.name not in tracked or _non_python_project(d)) and not _valid_project_dir(d)]
+        and (d.name not in tracked or _non_python_project(d) or _template_dir(d)) and not _valid_project_dir(d)]
     survivors = set(kept) | set(auto)
     new = [e for e in cur if e in survivors] + [e for e in kept + auto if e not in cur]
     if new == cur: return [], []

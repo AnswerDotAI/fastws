@@ -123,19 +123,19 @@ def test_ws_excludes_generates_from_intent_and_auto(tmp_path):
     pyproject.write_text(
         '[project]\nname = "uvws"\n\n[tool.uv.workspace]\nmembers = ["./*"]\n'
         'exclude = ["_*", "tmp", "example", "stale", "pending"]\n\n[tool.fastws]\nexclude = ["wanted-out"]\n')
-    for name in ('junk', 'fresh-clone', 'realpkg', 'tmpl', 'example', 'stale', 'wanted-out', 'pending', 'rustcrate'): (tmp_path/name).mkdir()
+    for name in ('junk', 'fresh-clone', 'realpkg', 'tmpl', 'tracked-tmpl', 'example', 'stale', 'wanted-out', 'pending', 'rustcrate'): (tmp_path/name).mkdir()
     (tmp_path/'realpkg'/'pyproject.toml').write_text('[project]\nname = "realpkg"\n')
-    (tmp_path/'tmpl'/'pyproject.toml').write_text('[project]\nname = "{repo}"\n')
+    for name in ('tmpl', 'tracked-tmpl'): (tmp_path/name/'pyproject.toml').write_text('[project]\nname = "{repo}"\n')
     (tmp_path/'rustcrate'/'Cargo.toml').write_text('[package]\nname = "rustcrate"\n')
     for name in ('example', 'stale', 'wanted-out'): (tmp_path/name/'pyproject.toml').write_text(f'[project]\nname = "{name}"\n')
 
-    tracked = {'fresh-clone', 'example', 'pending', 'rustcrate'}
+    tracked = {'fresh-clone', 'example', 'pending', 'rustcrate', 'tracked-tmpl'}
     added, removed = core._sync_ws_excludes(pyproject, tmp_path, tracked)
     data = core.tomllib.loads(pyproject.read_text())
 
-    # kept: glob, missing dir, tracked non-project; auto: junk, placeholder tmpl, tracked Cargo-only crate; intent: wanted-out; dropped: valid projects, tracked or not
-    assert set(data['tool']['uv']['workspace']['exclude']) == {'_*', 'tmp', 'pending', 'wanted-out', 'junk', 'tmpl', 'rustcrate'}
-    assert set(added) == {'wanted-out', 'junk', 'tmpl', 'rustcrate'}
+    # kept: glob, missing dir, tracked non-project; auto: junk, placeholder templates tracked or not, tracked Cargo-only crate; intent: wanted-out; dropped: valid projects, tracked or not
+    assert set(data['tool']['uv']['workspace']['exclude']) == {'_*', 'tmp', 'pending', 'wanted-out', 'junk', 'tmpl', 'tracked-tmpl', 'rustcrate'}
+    assert set(added) == {'wanted-out', 'junk', 'tmpl', 'tracked-tmpl', 'rustcrate'}
     assert set(removed) == {'example', 'stale'}
     assert data['tool']['fastws']['exclude'] == ['wanted-out']  # fastws table untouched
 
