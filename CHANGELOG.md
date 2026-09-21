@@ -1,5 +1,12 @@
 <!-- do not remove -->
 
+## 0.0.19
+
+### New Features
+
+- Exclude tracked project templates with {placeholder} names from the uv workspace so sync does not fail on unparsable names ([#38](https://github.com/AnswerDotAI/fastws/issues/38))
+
+
 ## 0.0.18
 
 ### New Features
