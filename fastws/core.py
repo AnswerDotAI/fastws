@@ -1,6 +1,6 @@
 "Fast workspace tools for multi-repo management."
 
-__all__ = ["ws_setup", "ws_clone", "ws_pull", "ws_status", "ws_branches", "ws_build", "ws_sync", "ws_add", "ws_remove"]
+__all__ = ["ws_setup", "ws_clone", "ws_pull", "ws_status", "ws_branches", "ws_build", "ws_sync", "ws_add", "ws_remove", "cargo_develop", "cargo_stage"]
 
 import ast, fnmatch, glob, hashlib, json, os, re, shlex, shutil, subprocess, sys, time
 from pathlib import Path
@@ -557,6 +557,26 @@ def _build_projects(root: Path, repos_file: str, project: str = None) -> list[tu
     dirs = dep_closure(key, graph)
     return [(n,d) for n,d in res if d in dirs]
 
+@call_parse(pos=['command'])
+def cargo_develop(
+    command: str = 'develop', # Subcommand name supplied by Cargo
+    path: str = '.', # Rust/Python project directory
+):
+    r"Build and install a mixed Rust/Python project's extension and opted-in binaries."
+    from .cargo import develop
+    for dest in develop(Path(path).resolve()): print(f'Installed {dest}')
+
+@call_parse(pos=['command'])
+def cargo_stage(
+    command: str = 'stage', # Subcommand name supplied by Cargo
+    path: str = '.', # Rust/Python project directory
+    profile: str = '', # Cargo profile; defaults to the maturin profile or dev
+    target: str = '', # Cargo target triple
+):
+    r"Stage Python-free native binaries for maturin wheel builds."
+    from .cargo import stage_binaries
+    for dest in stage_binaries(Path(path).resolve(), profile or None, target or None): print(f'Staged {dest}')
+
 @call_parse
 def ws_build(
     workspace: str = "",  # Workspace root; defaults to active venv parent when available
@@ -923,6 +943,9 @@ async def ws_sync(
     if up: _cargo_update(root, workers=workers)
     _sync_cargo_keys(root)
     subprocess.run(["uv", "sync", "-U"] if up else ["uv", "sync"], check=True, cwd=root)
+    for _,d in _build_projects(root, repos_file):
+        cfg = tomllib.loads((d/'pyproject.toml').read_text()).get('tool', {}).get('maturin', {})
+        if 'python-source' in cfg and cfg.get('bindings') != 'bin': cargo_develop(path=str(d))
     if up: _upgrade_stamp(root).touch()
     if js_members: _sync_js(root, js_members)
 

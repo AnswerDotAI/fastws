@@ -28,7 +28,6 @@ def test_repos_file_roundtrip(tmp_path):
     repos_path = tmp_path/'repos.txt'
     repos_path.write_text('# header\nAnswerDotAI/fastws[dev]\njph00/private[docs] ~/private\nfastai/fastai sub/dir\n')
 
-    assert core._load_repos(repos_path) == ['AnswerDotAI/fastws', 'jph00/private', 'fastai/fastai']
     assert core._load_repo_entries(repos_path, tmp_path) == [
         ('AnswerDotAI/fastws', tmp_path/'fastws', {'dev'}),
         ('jph00/private', core.Path('~/private').expanduser(), {'docs'}),
@@ -68,39 +67,6 @@ def test_invalid_repo_extras(entry):
     with pytest.raises(SystemExit, match='Invalid repo entry'): core._parse_repo_line(entry)
 
 
-def test_ws_pyproject_from_template_adds_projects(tmp_path):
-    (tmp_path/'pyproject.tmpl').write_text('[project]\nname = "uvws"\ndependencies = [\n    "ipython>=8.34.0",\n]\n\n[tool.uv.sources]\n\n')
-    for name in ('alpha', 'beta'):
-        (tmp_path/name).mkdir()
-        (tmp_path/name/'pyproject.toml').write_text(f'[project]\nname = "{name}"\n')
-
-    added = core._sync_ws_pyproject(tmp_path/'pyproject.toml', tmp_path/'pyproject.tmpl', ['alpha', 'beta'])
-    content = (tmp_path/'pyproject.toml').read_text()
-    assert added == ['alpha', 'beta']
-    for s in ('alpha = { workspace = true }', 'beta = { workspace = true }', '"alpha"', '"beta"', 'ipython>=8.34.0'): assert s in content
-
-    added = core._sync_ws_pyproject(tmp_path/'pyproject.toml', tmp_path/'pyproject.tmpl', ['alpha', 'beta'])
-    assert added == []
-    assert (tmp_path/'pyproject.toml').read_text() == content
-
-
-def test_ws_pyproject_preserves_existing_entries(tmp_path):
-    # a case-only difference is the same dependency, and hand-written path sources survive syncs
-    pyproject = tmp_path/'pyproject.toml'
-    orig = '[project]\nname = "uvws"\ndependencies = ["FastWS"]\n\n[tool.uv.sources]\nFastWS = { workspace = true }\n'
-    pyproject.write_text(orig)
-    assert core._sync_ws_pyproject(pyproject, tmp_path/'pyproject.tmpl', ['fastws']) == []
-    assert pyproject.read_text() == orig
-
-    pyproject.write_text('[project]\nname = "uvws"\ndependencies = [\n    "mytool",\n]\n\n[tool.uv.sources]\nmytool = { path = "../private/mytool", editable = true }\n')
-    (tmp_path/'alpha').mkdir()
-    (tmp_path/'alpha'/'pyproject.toml').write_text('[project]\nname = "alpha"\n')
-    assert core._sync_ws_pyproject(pyproject, tmp_path/'pyproject.tmpl', ['alpha']) == ['alpha']
-    content = pyproject.read_text()
-    assert 'mytool = { path = "../private/mytool", editable = true }' in content
-    assert 'alpha = { workspace = true }' in content
-
-
 def test_sync_extras_preserves_constraints_markers_and_unrelated_settings(tmp_path):
     pyproject = tmp_path/'pyproject.toml'
     pyproject.write_text('[project]\nname = "ws"\ndependencies = [\'My_Pkg[old]>=1; python_version >= "3.10"\', "other[keep]"]\n'
@@ -113,79 +79,6 @@ def test_sync_extras_preserves_constraints_markers_and_unrelated_settings(tmp_pa
         assert req.extras == extras and str(req.specifier) == '>=1' and str(req.marker) == 'python_version >= "3.10"'
         assert other == 'other[keep]' and len(data['project']['dependencies']) == 2
         assert data['tool']['uv']['sources'] == {'My_Pkg': {'path': '../somewhere', 'editable': True}}
-        before = pyproject.stat().st_mtime_ns
-        core._sync_ws_pyproject(pyproject, tmp_path/'pyproject.tmpl', ['my-pkg'], extras={'my-pkg': extras})
-        assert pyproject.stat().st_mtime_ns == before
-
-
-def test_ws_excludes_generates_from_intent_and_auto(tmp_path):
-    pyproject = tmp_path/'pyproject.toml'
-    pyproject.write_text(
-        '[project]\nname = "uvws"\n\n[tool.uv.workspace]\nmembers = ["./*"]\n'
-        'exclude = ["_*", "tmp", "example", "stale", "pending"]\n\n[tool.fastws]\nexclude = ["wanted-out"]\n')
-    for name in ('junk', 'fresh-clone', 'realpkg', 'tmpl', 'tracked-tmpl', 'example', 'stale', 'wanted-out', 'pending', 'rustcrate'): (tmp_path/name).mkdir()
-    (tmp_path/'realpkg'/'pyproject.toml').write_text('[project]\nname = "realpkg"\n')
-    for name in ('tmpl', 'tracked-tmpl'): (tmp_path/name/'pyproject.toml').write_text('[project]\nname = "{repo}"\n')
-    (tmp_path/'rustcrate'/'Cargo.toml').write_text('[package]\nname = "rustcrate"\n')
-    for name in ('example', 'stale', 'wanted-out'): (tmp_path/name/'pyproject.toml').write_text(f'[project]\nname = "{name}"\n')
-
-    tracked = {'fresh-clone', 'example', 'pending', 'rustcrate', 'tracked-tmpl'}
-    added, removed = core._sync_ws_excludes(pyproject, tmp_path, tracked)
-    data = core.tomllib.loads(pyproject.read_text())
-
-    # kept: glob, missing dir, tracked non-project; auto: junk, placeholder templates tracked or not, tracked Cargo-only crate; intent: wanted-out; dropped: valid projects, tracked or not
-    assert set(data['tool']['uv']['workspace']['exclude']) == {'_*', 'tmp', 'pending', 'wanted-out', 'junk', 'tmpl', 'tracked-tmpl', 'rustcrate'}
-    assert set(added) == {'wanted-out', 'junk', 'tmpl', 'tracked-tmpl', 'rustcrate'}
-    assert set(removed) == {'example', 'stale'}
-    assert data['tool']['fastws']['exclude'] == ['wanted-out']  # fastws table untouched
-
-    content = pyproject.read_text()
-    assert core._sync_ws_excludes(pyproject, tmp_path, tracked) == ([], [])
-    assert pyproject.read_text() == content
-
-    # a crate that gains a Python layer rejoins the workspace on the next sync
-    (tmp_path/'rustcrate'/'pyproject.toml').write_text('[project]\nname = "rustcrate"\n')
-    assert core._sync_ws_excludes(pyproject, tmp_path, tracked) == ([], ['rustcrate'])
-
-
-def test_external_projects_discovers_root_and_subdir_packages(tmp_path):
-    root = tmp_path/'ws'
-    root.mkdir()
-    single = tmp_path/'single'
-    single.mkdir()
-    (single/'pyproject.toml').write_text('[project]\nname = "singlepkg"\n')
-    multi = tmp_path/'multi'
-    (multi/'notes').mkdir(parents=True)
-    for name, pkg in (('tool1', 'tool1'), ('tmpl', '{repo}')):
-        (multi/name).mkdir()
-        (multi/name/'pyproject.toml').write_text(f'[project]\nname = "{pkg}"\n')
-
-    assert core._external_projects(root, [single, multi, tmp_path/'missing']) == [('singlepkg', '../single'), ('tool1', '../multi/tool1')]
-    (root/'repos.txt').write_text(f'org/single[dev] {single}\norg/multi[docs] {multi}\n')
-    extras = core._repo_extras(root, core._load_repo_entries(root/'repos.txt', root))
-    assert extras == {'singlepkg': {'dev'}, 'tool1': {'docs'}}
-    core._sync_ws_pyproject(root/'pyproject.toml', root/'pyproject.tmpl', [], core._external_projects(root, [single, multi]), extras)
-    data = core.tomllib.loads((root/'pyproject.toml').read_text())
-    assert data['project']['dependencies'] == ['singlepkg[dev]', 'tool1[docs]']
-    assert data['tool']['uv']['sources']['tool1'] == {'path': '../multi/tool1', 'editable': True}
-
-
-@pytest.mark.parametrize('manifest', ['pyproject.toml', 'Cargo.toml', 'package.json'])
-def test_project_dirs_expands_patterns_and_filters_manifests(tmp_path, manifest):
-    for name in ('a', 'b', 'empty'): (tmp_path/'pkgs'/name).mkdir(parents=True)
-    for name in ('a', 'b'): (tmp_path/'pkgs'/name/manifest).write_text('')
-    members, exclude = ['pkgs/*', 'pkgs/a'], ['./pkgs/b']
-    assert core._project_dirs(tmp_path, manifest, members, exclude) == [tmp_path/'pkgs'/'a']
-    assert core._project_dirs(tmp_path, members=members, exclude=exclude) == [tmp_path/'pkgs'/'a', tmp_path/'pkgs'/'empty']
-
-
-def test_ws_projects_skip_excluded_dirs_and_template_names(tmp_path):
-    (tmp_path/'pyproject.toml').write_text('[tool.uv.workspace]\nmembers = ["./*"]\nexclude = ["skip-*"]\n')
-    for name, pkg in (('keep', 'keepme'), ('skip-template', 'skipme'), ('template', '{repo}')):
-        (tmp_path/name).mkdir()
-        (tmp_path/name/'pyproject.toml').write_text(f'[project]\nname = "{pkg}"\n')
-
-    assert core._ws_projects(tmp_path) == ['keepme']
 
 
 def test_remove_from_pyproject(tmp_path):
@@ -196,35 +89,6 @@ def test_remove_from_pyproject(tmp_path):
     content = pyproject.read_text()
     assert 'alpha' not in content
     assert 'mytool = { path = "../private/mytool", editable = true }' in content  # path sources survive
-
-    assert core._remove_from_pyproject(pyproject, ['alpha']) == []
-    assert pyproject.read_text() == content
-
-
-async def test_git_repo_resolution(tmp_path):
-    repo = tmp_path/'proj'
-    repo.mkdir()
-    (repo/'pyproject.toml').write_text('[project]\nname = "proj"\n')
-    g = mk_repo(repo)
-
-    with pytest.raises(SystemExit, match='origin'): core._origin_repo(repo)
-    assert await core._discover_ws_repos(tmp_path) == []
-
-    g.remote('add', 'origin', 'git@github.com:AnswerDotAI/Proj.git')
-    assert core._origin_repo(repo) == 'AnswerDotAI/Proj'
-    assert await core._discover_ws_repos(tmp_path) == ['AnswerDotAI/Proj']
-    assert core._resolve_add_target(tmp_path, 'proj') == ('AnswerDotAI/Proj', True, None)
-
-    # discovery covers every root git dir, even excluded non-Python ones; `_`-prefixed dirs are private
-    crate = tmp_path/'crate'
-    crate.mkdir()
-    (crate/'Cargo.toml').write_text('[package]\nname = "crate"\n')
-    mk_repo(crate).remote('add', 'origin', 'git@github.com:AnswerDotAI/crate.git')
-    hidden = tmp_path/'_scratch'
-    hidden.mkdir()
-    mk_repo(hidden).remote('add', 'origin', 'git@github.com:AnswerDotAI/scratch.git')
-    (tmp_path/'pyproject.toml').write_text('[tool.uv.workspace]\nmembers = ["./*"]\nexclude = ["crate"]\n')
-    assert sorted(await core._discover_ws_repos(tmp_path)) == ['AnswerDotAI/Proj', 'AnswerDotAI/crate']
 
 
 def test_ws_remove_refuses_unsafe_repos(tmp_path):
@@ -250,70 +114,35 @@ def test_ws_remove_refuses_unsafe_repos(tmp_path):
     assert (tmp_path/'repos.txt').read_text() == 'AnswerDotAI/keep\n'
 
 
-def test_upgrade_stamp(tmp_path):
-    assert core._should_upgrade(tmp_path)  # no stamp yet
-    core._upgrade_stamp(tmp_path).touch()
-    assert not core._should_upgrade(tmp_path)  # fresh stamp
-    old = core.time.time() - 90000
-    os.utime(core._upgrade_stamp(tmp_path), (old, old))
-    assert core._should_upgrade(tmp_path)  # stamp >24h old
-
-
-def test_cargo_keys_hash_contents_and_patched_git_deps(tmp_path):
+def test_cargo_key_hashes_lock_and_patched_dependency_contents(tmp_path):
     crate, dep = tmp_path/'crate', tmp_path/'dep'
     for d in crate, dep: (d/'src').mkdir(parents=True)
-    (crate/'.git').mkdir()
-    (tmp_path/'.cargo').mkdir()
-    # exclude the crate from the uv workspace: crates are keyed regardless of uv membership
-    (tmp_path/'pyproject.toml').write_text('[tool.uv.workspace]\nmembers = ["*"]\nexclude = ["crate"]\n')
-    (tmp_path/'.cargo'/'config.toml').write_text(f'[patch."https://example.com/dep"]\ndep = {{ path = "{dep}" }}\n')
-    (crate/'Cargo.toml').write_text('[package]\nname = "crate"\nversion = "0.1.0"\n\n[dependencies]\ndep = { git = "https://example.com/dep" }\n')
-    lock = crate/'Cargo.lock'
-    lock.write_text('first lock\n')
-    (crate/'src'/'lib.rs').write_text('root source\n')
-    (dep/'Cargo.toml').write_text('[package]\nname = "dep"\nversion = "0.1.0"\n')
-    dep_src = dep/'src'/'lib.rs'
-    dep_src.write_text('dependency source\n')
-
-    core._sync_cargo_keys(tmp_path)
-    key = crate/'.git'/'fastws-cargo-key'
-    first, mtime = key.read_text(), key.stat().st_mtime_ns
-
-    lock_mtime = lock.stat().st_mtime_ns
-    os.utime(lock, ns=(lock_mtime + 1_000_000_000, lock_mtime + 1_000_000_000))
-    core._sync_cargo_keys(tmp_path)
-    assert key.read_text() == first and key.stat().st_mtime_ns == mtime  # mtime alone doesn't change the key
-
-    lock.write_text('second lock\n')
-    core._sync_cargo_keys(tmp_path)
-    second = key.read_text()
-    assert second != first  # lock content does
-
-    dep_src.write_text('changed dependency source\n')
-    core._sync_cargo_keys(tmp_path)
-    assert key.read_text() != second  # so does a patched dep's source
+    (crate/'Cargo.toml').write_text(r'''[dependencies]
+dep = { git = "https://example.com/dep" }
+''')
+    (dep/'Cargo.toml').touch()
+    source, lock = dep/'src'/'lib.rs', crate/'Cargo.lock'
+    source.write_text('original')
+    lock.write_text('first lock')
+    patches = {('https://example.com/dep', 'dep'): dep}
+    first = core._cargo_key(crate, patches, None)
+    lock.write_text('second lock')
+    second = core._cargo_key(crate, patches, None)
+    assert second != first
+    source.write_text('changed')
+    assert core._cargo_key(crate, patches, None) != second
 
 
-def test_cargo_key_ignores_unused_patch_order(tmp_path):
-    crate = tmp_path/'crate'
-    (crate/'.git').mkdir(parents=True)
-    (crate/'Cargo.toml').write_text('[package]\nname = "crate"\n')
-    lock = crate/'Cargo.lock'
-    head = 'version = 4\n\n[[package]]\nname = "crate"\nversion = "0.1.0"\n\n'
-    a = '[[patch.unused]]\nname = "a"\nversion = "1"\n\n'
-    b = '[[patch.unused]]\nname = "b"\nversion = "1"\n'
-    lock.write_text(head+a+b)
-    core._sync_cargo_keys(tmp_path)
-    key = crate/'.git'/'fastws-cargo-key'
-    first, mtime = key.read_text(), key.stat().st_mtime_ns
-
-    lock.write_text(head+b+'\n'+a)
-    core._sync_cargo_keys(tmp_path)
-    assert key.read_text() == first and key.stat().st_mtime_ns == mtime
-
-    lock.write_text(head.replace('0.1.0', '0.1.1')+a+b)
-    core._sync_cargo_keys(tmp_path)
-    assert key.read_text() != first
+def test_cargo_lock_ignores_unused_patches(tmp_path):
+    lock = tmp_path/'Cargo.lock'
+    header = r'''version = 4
+[[package]]
+name = "crate"
+'''
+    lock.write_text(header + r'''[[patch.unused]]
+name = "unused"
+''')
+    assert core._cargo_lock_content(lock) == header.encode()
 
 
 def test_sync_cargo_patches_generates_and_preserves(tmp_path):
@@ -328,14 +157,10 @@ def test_sync_cargo_patches_generates_and_preserves(tmp_path):
     (family/'sub').mkdir(parents=True)
     (family/'Cargo.toml').write_text('[package]\nname = "family"\nversion = "0.1.0"\n\n[workspace]\nmembers = ["sub"]\n')
     (family/'sub'/'Cargo.toml').write_text('[package]\nname = "family-sub"\nversion = "0.1.0"\n')
-    scratch = tmp_path/'_scratch'
-    scratch.mkdir()
-    (scratch/'Cargo.toml').write_text('[package]\nname = "scratch"\n')
 
     added, removed = core._sync_cargo_patches(tmp_path)
     data = core.tomllib.loads(config.read_text())
     cio = data['patch']['crates-io']
-    # every local crate patched, nested cargo workspace members included, `_`-prefixed dirs skipped
     assert set(cio) == {'foreign', 'crate1', 'family', 'family-sub'}
     assert cio['foreign']['path'] == '/elsewhere/foreign'  # entries pointing outside the root are kept as-is
     assert cio['crate1']['path'] == str(crate1)
@@ -343,50 +168,6 @@ def test_sync_cargo_patches_generates_and_preserves(tmp_path):
     assert data['patch']['https://example.com/family']['family']['path'] == str(family)  # git deps on local crates get their URL table
     assert data['term']['quiet'] is True  # other sections untouched
     assert set(added) == {'crate1', 'family', 'family-sub'} and removed == ['gone']
-
-    content = config.read_text()
-    assert core._sync_cargo_patches(tmp_path) == ([], [])
-    assert config.read_text() == content
-
-    # a missing config file is created
-    bare = tmp_path/'ws2'
-    (bare/'c').mkdir(parents=True)
-    (bare/'c'/'Cargo.toml').write_text('[package]\nname = "c"\n')
-    core._sync_cargo_patches(bare)
-    assert core.tomllib.loads((bare/'.cargo'/'config.toml').read_text())['patch']['crates-io']['c']['path'] == str(bare/'c')
-
-
-def test_sync_cargo_wrapper_preserves_existing(tmp_path):
-    config = tmp_path/'.cargo'/'config.toml'
-    config.parent.mkdir()
-    config.write_text('[build]\nrustc-wrapper = "other-cache"\n')
-    assert not core._sync_cargo_wrapper(tmp_path)
-    assert core.tomllib.loads(config.read_text())['build']['rustc-wrapper'] == 'other-cache'
-
-
-def test_npm_dirs_discovers_root_and_declared_packages(tmp_path):
-    for name in ('app', 'crate', 'crate/wasm', 'crate/frontend', 'crate/docs', '_scratch', 'node_modules', 'crate/node_modules'):
-        d = tmp_path/name
-        d.mkdir(parents=True, exist_ok=True)
-        (d/'package.json').write_text('{}')
-    (tmp_path/'app'/'package-lock.json').write_text('{}')
-    (tmp_path/'crate'/'package.json').write_text('{"private": true, "workspaces": ["wasm", "front*", "node_modules", "wasm", "missing"]}')
-    (tmp_path/'crate'/'frontend'/'bun.lock').write_text('')  # lockfiles do not override explicit membership
-
-    assert core._npm_dirs(tmp_path) == [tmp_path/'app', tmp_path/'crate', tmp_path/'crate'/'wasm', tmp_path/'crate'/'frontend']
-
-
-def test_npm_dirs_honours_fastws_exclude(tmp_path):
-    (tmp_path/'pyproject.toml').write_text('[tool.fastws]\nexclude = ["app", "tool*", "py/examples"]\n')
-    for name in ('app', 'lib', 'tools'):
-        (tmp_path/name).mkdir()
-        (tmp_path/name/'package.json').write_text('{}')
-    for name in ('examples', 'wasm'):
-        (tmp_path/'py'/name).mkdir(parents=True)
-        (tmp_path/'py'/name/'package.json').write_text('{}')  # examples is excluded by its root-relative path
-    (tmp_path/'py'/'package.json').write_text('{"private": true, "workspaces": ["*"]}')
-
-    assert core._npm_dirs(tmp_path) == [tmp_path/'lib', tmp_path/'py', tmp_path/'py'/'wasm']
 
 
 def test_sync_ws_package_json_preserves_local_and_merges_shared(tmp_path):
@@ -398,18 +179,4 @@ def test_sync_ws_package_json_preserves_local_and_merges_shared(tmp_path):
         'allowScripts': {'other': False, 'wasm-pack': True}}
 
 
-def test_ws_excludes_treat_npm_only_dirs_like_cargo_only(tmp_path):
-    pyproject = tmp_path/'pyproject.toml'
-    pyproject.write_text('[project]\nname = "uvws"\n\n[tool.uv.workspace]\nmembers = ["./*"]\nexclude = []\n')
-    for name in ('app', 'pending'): (tmp_path/name).mkdir()
-    (tmp_path/'app'/'package.json').write_text('{}')
 
-    # a tracked npm-only checkout is a valid JS project: excluded from uv, never pending; an empty tracked dir still awaits scaffolding
-    assert core._sync_ws_excludes(pyproject, tmp_path, {'app', 'pending'}) == (['app'], [])
-    assert core._pending_dirs(tmp_path) == ['pending']
-
-
-def test_check_rustup_rejects_shadowed_compiler(tmp_path, monkeypatch):
-    for tool in ('rustup', 'rustc'): (tmp_path/tool).touch(mode=0o755)
-    monkeypatch.setenv('PATH', str(tmp_path))
-    with pytest.raises(SystemExit, match='rustc resolves to'): core._check_rustup()

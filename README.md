@@ -170,6 +170,34 @@ ws-build --project solveit  # only this package and its transitive workspace dep
 
 `--project` selects by package name and follows declared runtime and build dependencies, including workspace packages in external checkouts. Other packages in the output directory are left untouched. Without it, the whole workspace is built as before.
 
+### `cargo develop`
+
+Rebuild a mixed Rust/Python project's extension and replace it in the editable source package:
+
+```bash
+cargo develop
+cargo develop --path /path/to/project
+```
+
+Run from the project root, or give its directory with `--path`. The command reads `python-source`, `module-name`, `manifest-path` and features from `[tool.maturin]`. It always builds with Cargo's `test` profile, matching bare `cargo test`. The project must produce a `cdylib` and set `python-source`. To use release settings without command-line flags, add `[profile.test]` with `inherits = "release"` to `Cargo.toml`. Keep incremental compilation enabled for the local crate in that profile.
+
+Make the initial editable installation through `ws-sync` or maturin. Repeat that installation when package metadata or entry points change. Running Python processes keep the extension they loaded.
+
+Cargo must already build a loadable Python extension. For PyO3 extension-module builds on macOS, configure the linker in `build.rs` with `pyo3_build_config::add_extension_module_link_args()`. This command does not inject maturin's extra compiler flags.
+
+To share the library build with `cargo test`, also produce an `rlib` and use the same features for both commands. Rust unit tests compile a separate library with `cfg(test)`; integration tests reuse the ordinary library. `cargo develop` does not change the project's Cargo configuration or its test layout.
+
+Set `native-binaries = true` under `[tool.fastws]` to build and install the package's Cargo binary targets into the active venv alongside its extension. Cargo reports the executable paths; there is no separate list of binary names.
+
+For wheels containing these binaries, use `fastws.build_backend` as the build backend and include `fastws-cli>=0.0.20` alongside maturin in `[build-system].requires`. Set `[tool.maturin].data` to the wheel-data directory. The backend stages Python-free binaries in its `scripts/` subdirectory, then delegates packaging to maturin. Explicit profile and target arguments from maturin's build settings also apply to the binaries.
+
+Direct maturin CLI builds bypass the Python build backend. Stage the binaries first with the shared command:
+
+```bash
+cargo stage --profile dist
+maturin build --profile dist
+```
+
 ### `ws-sync`
 
 Syncing proceeds in this order:
@@ -199,7 +227,9 @@ Each sync updates `workspaces` in the root `package.json`. It creates the file w
 
 An optional tracked `package.json.shared` is merged into the root `package.json` on every sync. Object-valued fields merge one level deep, shared values win conflicts, and arrays replace rather than concatenate. Unrelated local settings remain; removing a shared key does not delete its local value. Workspace discovery still manages `workspaces`. Use this file for shared policy such as version-pinned npm `allowScripts` approvals.
 
-After `uv sync`, fastws runs `<tool> install` at the workspace root. It then runs `<tool> run build` in each JavaScript package containing both `Cargo.toml` and a `build` script. Cargo handles incremental compilation. Other build steps still run.
+After `uv sync`, fastws runs `cargo develop` in each mixed Rust/Python project. Cargo skips unchanged compilation inputs. These projects should keep only packaging inputs in `tool.uv.cache-keys`; Rust source changes are handled by Cargo rather than triggering a separate maturin editable build. Maturin packages with `bindings = "bin"` keep their existing uv installation path.
+
+Fastws then runs `<tool> install` at the workspace root. It runs `<tool> run build` in each JavaScript package containing both `Cargo.toml` and a `build` script. Cargo handles incremental compilation. Other build steps still run.
 
 For npm, sync hides routine install summaries and build-command banners. Install warnings, audit findings, unreviewed install scripts, and failure diagnostics remain visible. Build scripts retain their own output; configure their tools to suppress routine progress. Other package managers retain their normal output.
 
@@ -286,4 +316,4 @@ await check_release('mdhtml')     # one repo: list of unreleased commit summarie
 
 ## Tests
 
-Run `pytest -q` for the regular suite. `pytest -q tests/test_setup.py -m slow` also builds the current package and bootstraps a fresh environment with real Git and uv; it may fetch package dependencies. Run `chkstyle fastws tests` after edits.
+Run `pytest -q`. Keep tests concise and focused on substantive logic. Do not test policy choices, settings, constants, or orchestration. Do not add tests merely because code changed.

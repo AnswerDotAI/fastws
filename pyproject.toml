@@ -16,7 +16,7 @@ classifiers = [
 ]
 
 dependencies = [
-  "fastcore>=2.2.28",
+  "fastcore>=2.2.33",
   "fastgit>=0.1.2",
   "ghapi>=2.0.6",
   "packaging",
@@ -33,6 +33,8 @@ dev = [
 ]
 
 [project.scripts]
+cargo-develop = "fastws.core:cargo_develop"
+cargo-stage = "fastws.core:cargo_stage"
 ws-setup = "fastws.core:ws_setup"
 ws-clone = "fastws.core:ws_clone"
 ws-pull = "fastws.core:ws_pull"
@@ -47,10 +49,6 @@ ws-releases = "fastws.releases:ws_releases"
 [project.urls]
 Homepage = "https://github.com/AnswerDotAI/fastws"
 
-[tool.pytest.ini_options]
-asyncio_mode = "auto"
-markers = ["slow: builds and installs a fresh workspace; may fetch package dependencies"]
-addopts = "-m 'not slow'"
 
 [tool.setuptools.dynamic]
 version = { attr = "fastws.__version__" }
