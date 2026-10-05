@@ -1,5 +1,12 @@
 <!-- do not remove -->
 
+## 0.0.20
+
+### New Features
+
+- Add cargo develop and cargo stage commands, maturin build backend for wheels with Cargo binaries, and run cargo develop in ws-sync ([#39](https://github.com/AnswerDotAI/fastws/issues/39))
+
+
 ## 0.0.19
 
 ### New Features
