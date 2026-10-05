@@ -1,5 +1,12 @@
 <!-- do not remove -->
 
+## 0.0.21
+
+### Bugs Squashed
+
+- Clear stale binaries from the wheel-data scripts dir before staging native binaries ([#40](https://github.com/AnswerDotAI/fastws/issues/40))
+
+
 ## 0.0.20
 
 ### New Features
