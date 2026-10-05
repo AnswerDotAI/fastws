@@ -185,11 +185,11 @@ Make the initial editable installation through `ws-sync` or maturin. Repeat that
 
 Cargo must already build a loadable Python extension. For PyO3 extension-module builds on macOS, configure the linker in `build.rs` with `pyo3_build_config::add_extension_module_link_args()`. This command does not inject maturin's extra compiler flags.
 
-To share the library build with `cargo test`, also produce an `rlib` and use the same features for both commands. Rust unit tests compile a separate library with `cfg(test)`; integration tests reuse the ordinary library. `cargo develop` does not change the project's Cargo configuration or its test layout.
+For reusable Rust libraries, keep the core crate Python-free and put PyO3 in an unpublished `py/` binding crate. Set the workspace's `default-members = [".", "py"]` and maturin's `manifest-path = "py/Cargo.toml"`. The binding crate should produce `["cdylib", "rlib"]` with `test = false`. Both commands then reuse the ordinary core and binding libraries. Rust unit tests still compile a separate `cfg(test)` executable; integration tests reuse the ordinary library. `cargo develop` does not change the project's Cargo configuration or its test layout.
 
 Set `native-binaries = true` under `[tool.fastws]` to build and install the package's Cargo binary targets into the active venv alongside its extension. Cargo reports the executable paths; there is no separate list of binary names.
 
-For wheels containing these binaries, use `fastws.build_backend` as the build backend and include `fastws-cli>=0.0.20` alongside maturin in `[build-system].requires`. Set `[tool.maturin].data` to the wheel-data directory. The backend stages Python-free binaries in its `scripts/` subdirectory, then delegates packaging to maturin. Explicit profile and target arguments from maturin's build settings also apply to the binaries.
+For wheels containing these binaries, use `fastws.build_backend` as the build backend and include `fastws-cli>=0.0.20` alongside maturin in `[build-system].requires`. Set `[tool.maturin].data` to a generated wheel-data directory. The backend replaces its `scripts/` subdirectory with the current Python-free binaries, then delegates packaging to maturin. Explicit profile and target arguments from maturin's build settings also apply to the binaries.
 
 Direct maturin CLI builds bypass the Python build backend. Stage the binaries first with the shared command:
 

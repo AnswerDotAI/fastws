@@ -64,4 +64,5 @@ def stage_binaries(root, profile=None, target=None):
     cfg = settings(root)['maturin']
     dest = root/cfg['data']/'scripts'
     artifacts = build(root, library=False, binaries=True, profile=profile, target=target, no_default_features=True)
+    if dest.exists(): shutil.rmtree(dest)
     return [replace(m['executable'], dest/Path(m['executable']).name) for m in artifacts if m.get('executable')]
