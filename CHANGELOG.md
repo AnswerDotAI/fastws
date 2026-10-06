@@ -1,5 +1,12 @@
 <!-- do not remove -->
 
+## 0.0.23
+
+### New Features
+
+- Regenerate uv no-build-isolation-package for fastws backend projects, skip publish=false crates in Cargo patches, unify TOML array replacement ([#42](https://github.com/AnswerDotAI/fastws/issues/42))
+
+
 ## 0.0.22
 
 ### New Features
