@@ -172,7 +172,7 @@ def _remove_from_pyproject(pyproject_path: Path, names: list[str]) -> list[str]:
     sources = {k:v for k,v in sources.items() if _pkg_key(k) not in targets}
     deps = [d for d in deps if _pkg_key(dep_key(d)) not in targets]
     content = _replace_table(content, "tool.uv.sources", "\n".join(f"{k} = {_fmt_source(v)}" for k,v in sources.items()))
-    content = _replace_project_dependencies(content, deps)
+    content = _replace_array(content, "project", "dependencies", deps)
     pyproject_path.write_text(content)
     return removed
 
@@ -247,17 +247,17 @@ def _sync_ws_excludes(pyproject_path: Path, root: Path, tracked: set[str]) -> tu
     survivors = set(kept) | set(auto)
     new = [e for e in cur if e in survivors] + [e for e in kept + auto if e not in cur]
     if new == cur: return [], []
-    content = _replace_ws_excludes(content, new)
+    content = _replace_array(content, "tool.uv.workspace", "exclude", new)
     tomllib.loads(content)  # never write an unparseable pyproject
     pyproject_path.write_text(content)
     return [e for e in new if e not in cur], [e for e in cur if e not in new]
 
-def _replace_ws_excludes(content: str, excludes: list[str]) -> str:
-    block = "exclude = [\n" + "".join(f'    "{e}",\n' for e in excludes) + "]"
-    if not (span := _table_span(content, "tool.uv.workspace")): return content.rstrip() + "\n\n[tool.uv.workspace]\n" + block + "\n"
+def _replace_array(content: str, table: str, key: str, values: list[str]) -> str:
+    block = f"{key} = [\n" + "".join(f'    {json.dumps(v)},\n' for v in values) + "]"
+    if not (span := _table_span(content, table)): return _replace_table(content, table, block)
     start,end = span
     section = content[start:end]
-    if m := re.search(r"(?m)^exclude\s*=\s*\[", section):
+    if m := re.search(rf"(?m)^{re.escape(key)}\s*=\s*\[", section):
         arr_start = m.end()-1
         arr_end = _find_array_end(section, arr_start)
         section = section[:m.start()] + block + section[arr_end+1:]
@@ -292,18 +292,6 @@ def _find_array_end(content: str, start: int) -> int:
             depth -= 1
             if depth == 0: return i
     raise ValueError("Unterminated TOML array")
-
-def _replace_project_dependencies(content: str, deps: list[str]) -> str:
-    if not (span := _table_span(content, "project")): raise SystemExit("Missing [project] table in pyproject.toml")
-    start,end = span
-    section = content[start:end]
-    dep_block = "dependencies = [\n" + "".join(f'    {json.dumps(dep)},\n' for dep in deps) + "]"
-    if m := re.search(r"(?m)^dependencies\s*=\s*\[", section):
-        arr_start = m.end()-1
-        arr_end = _find_array_end(section, arr_start)
-        section = section[:m.start()] + dep_block + section[arr_end+1:]
-    else: section = section.rstrip() + "\n" + dep_block + "\n"
-    return content[:start] + section + content[end:]
 
 def _init_ws_pyproject(path: Path, python: str = f"{sys.version_info.major}.{sys.version_info.minor}") -> bool:
     if path.exists(): return False
@@ -348,9 +336,20 @@ def _sync_ws_pyproject(pyproject_path: Path, template_path: Path, projects: list
     if missing or ext_missing:
         source_lines = "\n".join(f"{proj} = {_fmt_source(src)}" for proj,src in sources.items())
         content = _replace_table(content, "tool.uv.sources", source_lines)
-    if deps != data.get("project", {}).get("dependencies", []): content = _replace_project_dependencies(content, deps)
+    if deps != data.get("project", {}).get("dependencies", []): content = _replace_array(content, "project", "dependencies", deps)
     if content != original: pyproject_path.write_text(content)
     return missing + [n for n,_ in ext_missing]
+
+def _sync_build_isolation(pyproject_path: Path, projects: list[tuple[str, Path]]):
+    "Regenerate uv's non-isolated build list from the projects using the fastws backend."
+    content = pyproject_path.read_text()
+    packages = sorted({name for name,d in projects
+        if tomllib.loads((d/'pyproject.toml').read_text()).get('build-system', {}).get('build-backend') == 'fastws.build_backend'})
+    current = tomllib.loads(content).get('tool', {}).get('uv', {}).get('no-build-isolation-package', [])
+    if packages == current: return
+    content = _replace_array(content, 'tool.uv', 'no-build-isolation-package', packages)
+    tomllib.loads(content)
+    pyproject_path.write_text(content)
 
 def _editable_mapping(path: Path) -> dict[str,str]:
     tree = ast.parse(path.read_text(), filename=str(path))
@@ -645,18 +644,18 @@ def _cargo_patches(root: Path):
     return patches, config
 
 def _crate_pkgs(d: Path):
-    "(package name, dir) for the crate at `d` and its cargo workspace members"
+    "(`[package]` table, dir) for the crate at `d` and its cargo workspace members"
     try: data = tomllib.loads((d/"Cargo.toml").read_text())
     except tomllib.TOMLDecodeError: return
-    if name := data.get("package", {}).get("name"): yield name, d
+    if "name" in (pkg := data.get("package", {})): yield pkg, d
     for m in _project_dirs(d, "Cargo.toml", data.get("workspace", {}).get("members", [])):
         try: sub = tomllib.loads((m/"Cargo.toml").read_text())
         except tomllib.TOMLDecodeError: continue
-        if name := sub.get("package", {}).get("name"): yield name, m
+        if "name" in (pkg := sub.get("package", {})): yield pkg, m
 
-def _local_crates(root: Path) -> dict[str, Path]:
-    "Package name -> dir for every crate under `root`, nested cargo workspace members included"
-    return {name: d for crate in _crate_dirs(root) for name, d in _crate_pkgs(crate)}
+def _local_crates(root: Path) -> list[tuple[dict, Path]]:
+    "(`[package]` table, dir) for every crate under `root`, nested cargo workspace members included"
+    return [p for crate in _crate_dirs(root) for p in _crate_pkgs(crate)]
 
 def _git_dep_tables(root: Path, crates: dict[str, Path]) -> dict[str, dict[str, Path]]:
     "Git URL -> {package: local dir} for members' git deps that name a local crate"
@@ -688,14 +687,15 @@ def _entry_changes(current, new):
 def _sync_cargo_patches(root: Path) -> tuple[list[str], list[str]]:
     """Regenerate `[patch]` entries in the workspace `.cargo/config.toml` and return (added, removed).
 
-    Every local crate gets a `[patch.crates-io]` entry, and a member's git dep on a local crate gets
-    an entry under that URL, so builds anywhere under `root` use the checkouts: the cargo analog of
-    editable installs. Only entries whose path is inside `root` are managed; entries pointing
-    elsewhere (and any other config sections) are kept as-is, and a kept entry wins over a generated
-    one of the same name."""
+    Every local crate gets a `[patch.crates-io]` entry, except one marked `publish = false`, which never comes
+    from crates.io. A member's git dep on a local crate gets an entry under that URL. Builds anywhere under `root`
+    then use the checkouts: the cargo analog of editable installs. Only entries whose path is inside `root` are
+    managed; entries pointing elsewhere (and any other config sections) are kept as-is, and a kept entry wins
+    over a generated one of the same name."""
     root = root.resolve()
-    crates = _local_crates(root)
-    desired = {"crates-io": {name: str(d) for name, d in crates.items()}}
+    pkgs = _local_crates(root)
+    crates = {pkg["name"]: d for pkg, d in pkgs}
+    desired = {"crates-io": {pkg["name"]: str(d) for pkg, d in pkgs if pkg.get("publish") is not False}}
     for url, entries in _git_dep_tables(root, crates).items(): desired[url] = {name: str(d) for name, d in entries.items()}
     config = root/".cargo"/"config.toml"
     content = config.read_text() if config.exists() else ""
@@ -923,6 +923,8 @@ async def ws_sync(
     missing_projects = _sync_ws_pyproject(pyproject_path, template_path, _ws_projects(root), _external_projects(root, ext_dirs),
         _repo_extras(root, entries))
     if missing_projects: print(f"Added workspace projects: {', '.join(missing_projects)}")
+    projects = _build_projects(root, repos_file)
+    _sync_build_isolation(pyproject_path, projects)
 
     wrapper_added = _sync_cargo_wrapper(root)
     added_p, removed_p = _sync_cargo_patches(root)
@@ -943,7 +945,7 @@ async def ws_sync(
     if up: _cargo_update(root, workers=workers)
     _sync_cargo_keys(root)
     subprocess.run(["uv", "sync", "-U"] if up else ["uv", "sync"], check=True, cwd=root)
-    for _,d in _build_projects(root, repos_file):
+    for _,d in projects:
         cfg = tomllib.loads((d/'pyproject.toml').read_text()).get('tool', {}).get('maturin', {})
         if 'python-source' in cfg and cfg.get('bindings') != 'bin': cargo_develop(path=str(d))
     if up: _upgrade_stamp(root).touch()

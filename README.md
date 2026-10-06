@@ -74,7 +74,7 @@ Keep `repos.txt` tracked in the workspace Git repo. Put personal additions in a 
 
 `--repos-file myrepos.txt` uses `myrepos-local.txt` alongside it. Either list may be absent. Removing a repo from the baseline does not delete its checkout. The next sync discovers an existing root checkout as a personal addition. External checkouts also remain on disk; add them to the local list to keep managing them.
 
-The workspace `pyproject.toml` is local generated state. `ws-sync` creates it from the tracked `pyproject.tmpl` when available, or generates a minimal one, then maintains it while preserving personal settings except for the repo extras managed above. The template supplies starting defaults only: later template edits do not overwrite existing configuration. Ignore these files in the workspace repo (not in its member repos):
+The workspace `pyproject.toml` is local generated state. `ws-sync` creates it from the tracked `pyproject.tmpl` when available, or generates a minimal one, then maintains it while preserving personal settings except for the managed repo extras, workspace exclusions, and build-isolation list. The template supplies starting defaults only: later template edits do not overwrite existing configuration. Ignore these files in the workspace repo (not in its member repos):
 
 ```gitignore
 /repos-local.txt
@@ -215,7 +215,7 @@ Fastws maintains `tool.uv.workspace.exclude`. It excludes unlisted top-level dir
 
 Existing globs, entries for missing directories, and entries for checkouts that are still not Python projects are retained. Use `exclude = [...]` under `[tool.fastws]` to specify exclusions the scan cannot infer, such as keeping a valid project out of the workspace. Adding members preserves hand-written `[tool.uv.sources]` entries, including path and Git sources.
 
-Each sync regenerates Cargo overrides in the workspace's `.cargo/config.toml`. `[patch.crates-io]` gets an entry for each local crate, including nested Cargo workspace members. Git dependencies that name local crates get entries under the matching URL. Builds under the workspace root use these local checkouts. Entries pointing outside the root and other configuration sections are preserved.
+Each sync regenerates Cargo overrides in the workspace's `.cargo/config.toml`. `[patch.crates-io]` gets an entry for each local crate, including nested Cargo workspace members, except a crate marked `publish = false`, which never comes from crates.io. Git dependencies that name local crates get entries under the matching URL. Builds under the workspace root use these local checkouts. Entries pointing outside the root and other configuration sections are preserved.
 
 Do not commit a `Cargo.lock` generated under these patches. Its source-less local entries cannot be resolved on another machine.
 
@@ -226,6 +226,8 @@ Fastws discovers JavaScript packages directly under the workspace root. It reads
 Each sync updates `workspaces` in the root `package.json`. It creates the file when needed. It preserves external paths, globs, and unrelated settings. It reports added and removed packages.
 
 An optional tracked `package.json.shared` is merged into the root `package.json` on every sync. Object-valued fields merge one level deep, shared values win conflicts, and arrays replace rather than concatenate. Unrelated local settings remain; removing a shared key does not delete its local value. Workspace discovery still manages `workspaces`. Use this file for shared policy such as version-pinned npm `allowScripts` approvals.
+
+Before `uv sync`, fastws regenerates `tool.uv.no-build-isolation-package` with the sorted package names of projects using `fastws.build_backend`, including external checkouts. These builds use the shared environment's `fastws-cli` and `maturin`. Leave global build isolation enabled for other projects.
 
 After `uv sync`, fastws runs `cargo develop` in each mixed Rust/Python project. Cargo skips unchanged compilation inputs. These projects should keep only packaging inputs in `tool.uv.cache-keys`; Rust source changes are handled by Cargo rather than triggering a separate maturin editable build. Maturin packages with `bindings = "bin"` keep their existing uv installation path.
 

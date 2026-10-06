@@ -155,17 +155,17 @@ def test_sync_cargo_patches_generates_and_preserves(tmp_path):
     (crate1/'Cargo.toml').write_text('[package]\nname = "crate1"\nversion = "0.1.0"\n\n[dependencies]\nfamily = { git = "https://example.com/family" }\n')
     family = tmp_path/'family'
     (family/'sub').mkdir(parents=True)
-    (family/'Cargo.toml').write_text('[package]\nname = "family"\nversion = "0.1.0"\n\n[workspace]\nmembers = ["sub"]\n')
+    (family/'Cargo.toml').write_text('[package]\nname = "family"\nversion = "0.1.0"\npublish = false\n\n[workspace]\nmembers = ["sub"]\n')
     (family/'sub'/'Cargo.toml').write_text('[package]\nname = "family-sub"\nversion = "0.1.0"\n')
 
     added, removed = core._sync_cargo_patches(tmp_path)
     data = core.tomllib.loads(config.read_text())
     cio = data['patch']['crates-io']
-    assert set(cio) == {'foreign', 'crate1', 'family', 'family-sub'}
+    assert set(cio) == {'foreign', 'crate1', 'family-sub'}  # `publish = false` crates never come from crates.io
     assert cio['foreign']['path'] == '/elsewhere/foreign'  # entries pointing outside the root are kept as-is
     assert cio['crate1']['path'] == str(crate1)
     assert cio['family-sub']['path'] == str(family/'sub')
-    assert data['patch']['https://example.com/family']['family']['path'] == str(family)  # git deps on local crates get their URL table
+    assert data['patch']['https://example.com/family']['family']['path'] == str(family)  # git deps on local crates get their URL table, published or not
     assert data['term']['quiet'] is True  # other sections untouched
     assert set(added) == {'crate1', 'family', 'family-sub'} and removed == ['gone']
 
