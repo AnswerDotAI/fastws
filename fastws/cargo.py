@@ -59,12 +59,12 @@ def develop(root):
     lib, = [f for f in artifact['filenames'] if Path(f).suffix in ('.dylib', '.so', '.dll')]
     module = cfg.get('module-name', artifact['target']['name'])
     dest = root/cfg['python-source']/Path(*module.split('.'))
-    paths = [replace(lib, dest.with_name(dest.name + sysconfig.get_config_var('EXT_SUFFIX')))]
+    replace(lib, dest.with_name(dest.name + sysconfig.get_config_var('EXT_SUFFIX')))
     if binaries:
         env = Path(os.environ.get('VIRTUAL_ENV', sys.prefix))
         scripts = env/('Scripts' if os.name == 'nt' else 'bin')
-        paths += [replace(m['executable'], scripts/Path(m['executable']).name) for m in artifacts if m.get('executable')]
-    return paths
+        for m in artifacts:
+            if m.get('executable'): replace(m['executable'], scripts/Path(m['executable']).name)
 
 
 def stage_binaries(root, profile=None, target=None):
