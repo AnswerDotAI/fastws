@@ -1,5 +1,12 @@
 <!-- do not remove -->
 
+## 0.0.22
+
+### New Features
+
+- Install native binaries from all workspace default members, not just the root and binding crates ([#41](https://github.com/AnswerDotAI/fastws/issues/41))
+
+
 ## 0.0.21
 
 ### Bugs Squashed
