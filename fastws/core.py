@@ -564,7 +564,7 @@ def cargo_develop(
 ):
     r"Build and install a mixed Rust/Python project's extension and opted-in binaries."
     from .cargo import develop
-    for dest in develop(Path(path).resolve()): print(f'Installed {dest}')
+    for dest in develop(Path(path).resolve()): pass
 
 @call_parse(pos=['command'])
 def cargo_stage(

@@ -11,12 +11,20 @@ def settings(root):
     return tomllib.loads((root/'pyproject.toml').read_text()).get('tool', {})
 
 
+def cargo(root, *args):
+    "Run Cargo in the project and return its standard output."
+    return subprocess.run(['cargo', *args], cwd=root, stdout=subprocess.PIPE, text=True, check=True).stdout
+
+
+def members(root):
+    "The manifests of the workspace's member packages."
+    return {Path(p['manifest_path']) for p in json.loads(cargo(root, 'metadata', '--no-deps', '--format-version', '1'))['packages']}
+
+
 def build(root, *, library=True, binaries=False, profile=None, target=None, no_default_features=False):
-    "Build with Cargo and return this package's compiler artifacts."
+    "Build with Cargo and return the compiler artifacts of the workspace's packages."
     cfg = settings(root)['maturin']
-    manifest = (root/'Cargo.toml').resolve()
-    binding = (root/cfg.get('manifest-path', 'Cargo.toml')).resolve()
-    cmd = ['cargo', 'build', '--manifest-path', str(manifest), '--message-format=json-render-diagnostics']
+    cmd = ['build', '--manifest-path', str((root/'Cargo.toml').resolve()), '--message-format=json-render-diagnostics']
     if library: cmd.append('--lib')
     if binaries: cmd.append('--bins')
     if profile := profile or cfg.get('profile'): cmd += ['--profile', profile]
@@ -26,9 +34,9 @@ def build(root, *, library=True, binaries=False, profile=None, target=None, no_d
         if features := cfg.get('features'): cmd += ['--features', ','.join(features)]
         for flag in ('all-features', 'no-default-features'):
             if cfg.get(flag): cmd.append('--' + flag)
-    out = subprocess.run(cmd, cwd=root, stdout=subprocess.PIPE, text=True, check=True).stdout
-    messages = [json.loads(line) for line in out.splitlines()]
-    return [m for m in messages if m.get('reason') == 'compiler-artifact' and Path(m['manifest_path']) in (manifest, binding)]
+    messages = [json.loads(line) for line in cargo(root, *cmd).splitlines()]
+    workspace = members(root)
+    return [m for m in messages if m.get('reason') == 'compiler-artifact' and Path(m['manifest_path']) in workspace]
 
 
 def replace(source, destination):
