@@ -189,7 +189,9 @@ For reusable Rust libraries, keep the core crate Python-free and put PyO3 in an 
 
 Set `native-binaries = true` under `[tool.fastws]` to build and install the binary targets of the workspace's default members into the active venv alongside the extension. A binary can live in its own member crate, such as a `cli/` crate beside `py/`, listed in `default-members`. maturin's sdist keeps only the members that the extension depends on, so a wheel built from the sdist lacks a binary from such a crate. Cargo reports the executable paths; there is no separate list of binary names.
 
-For wheels containing these binaries, use `fastws.build_backend` as the build backend and include `fastws-cli>=0.0.20` alongside maturin in `[build-system].requires`. Set `[tool.maturin].data` to a generated wheel-data directory. The backend replaces its `scripts/` subdirectory with the current Python-free binaries, then delegates packaging to maturin. Explicit profile and target arguments from maturin's build settings also apply to the binaries.
+For distribution wheels containing these binaries, use `fastws.build_backend` as the build backend and include `fastws-cli>=0.0.20` alongside maturin in `[build-system].requires`. Set `[tool.maturin].data` to a generated wheel-data directory. The backend replaces its `scripts/` subdirectory with the current Python-free binaries, then delegates packaging to maturin. Explicit profile and target arguments from maturin's build settings also apply to the binaries.
+
+Editable builds through this backend install only Python metadata and the source path. `ws-sync` then runs `cargo develop` to build and install the extension and binaries. After standalone `uv sync`, run `cargo develop` yourself.
 
 Direct maturin CLI builds bypass the Python build backend. Stage the binaries first with the shared command:
 
@@ -229,7 +231,7 @@ An optional tracked `package.json.shared` is merged into the root `package.json`
 
 Before `uv sync`, fastws regenerates `tool.uv.no-build-isolation-package` with the sorted package names of projects using `fastws.build_backend`, including external checkouts. These builds use the shared environment's `fastws-cli` and `maturin`. Leave global build isolation enabled for other projects.
 
-After `uv sync`, fastws runs `cargo develop` in each mixed Rust/Python project. Cargo skips unchanged compilation inputs. These projects should keep only packaging inputs in `tool.uv.cache-keys`; Rust source changes are handled by Cargo rather than triggering a separate maturin editable build. Maturin packages with `bindings = "bin"` keep their existing uv installation path.
+After `uv sync`, fastws runs `cargo develop` in each mixed Rust/Python project. Cargo skips unchanged compilation inputs. Projects using `fastws.build_backend` should keep only packaging inputs in `tool.uv.cache-keys`; Rust source changes are handled by Cargo. Maturin packages with `bindings = "bin"` keep their existing uv installation path.
 
 Fastws then runs `<tool> install` at the workspace root. It runs `<tool> run build` in each JavaScript package containing both `Cargo.toml` and a `build` script. Cargo handles incremental compilation. Other build steps still run.
 

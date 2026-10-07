@@ -26,6 +26,7 @@ dependencies = [
 [project.optional-dependencies]
 dev = [
   "fastship",
+  "maturin>=1.9.4,<2.0",
   "build",
   "twine",
   "pytest",
