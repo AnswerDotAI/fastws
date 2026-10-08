@@ -49,7 +49,7 @@ def replace(source, destination):
 
 
 def develop(root):
-    "Install a Python extension and opted-in binaries from one Cargo build."
+    "Install a Python extension, opted-in binaries and wheel data files from one Cargo build."
     tool = settings(root)
     cfg = tool['maturin']
     if 'python-source' not in cfg: raise SystemExit(r'cargo develop requires tool.maturin.python-source')
@@ -60,11 +60,16 @@ def develop(root):
     module = cfg.get('module-name', artifact['target']['name'])
     dest = root/cfg['python-source']/Path(*module.split('.'))
     replace(lib, dest.with_name(dest.name + sysconfig.get_config_var('EXT_SUFFIX')))
+    env = Path(os.environ.get('VIRTUAL_ENV', sys.prefix))
     if binaries:
-        env = Path(os.environ.get('VIRTUAL_ENV', sys.prefix))
         scripts = env/('Scripts' if os.name == 'nt' else 'bin')
         for m in artifacts:
             if m.get('executable'): replace(m['executable'], scripts/Path(m['executable']).name)
+    # Editable builds through `build_backend` don't install the wheel's data files, which a wheel install puts under the prefix.
+    if 'data' in cfg:
+        data = root/cfg['data']/'data'
+        for f in data.rglob('*'):
+            if f.is_file(): replace(f, env/f.relative_to(data))
 
 
 def stage_binaries(root, profile=None, target=None):

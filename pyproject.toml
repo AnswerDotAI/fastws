@@ -20,13 +20,13 @@ dependencies = [
   "fastgit>=0.1.2",
   "ghapi>=2.0.6",
   "packaging",
+  "maturin>=1.9.4,<2.0",
   "tomli; python_version < '3.11'",
 ]
 
 [project.optional-dependencies]
 dev = [
   "fastship",
-  "maturin>=1.9.4,<2.0",
   "build",
   "twine",
   "pytest",
