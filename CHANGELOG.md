@@ -1,5 +1,13 @@
 <!-- do not remove -->
 
+## 0.0.24
+
+### New Features
+
+- cargo develop installs wheel data files from tool.maturin.data into the venv; make maturin a runtime dependency ([#44](https://github.com/AnswerDotAI/fastws/issues/44))
+- Make fastws.`build_backend` editable builds install only metadata and a source .pth, leaving Rust compilation to cargo develop ([#43](https://github.com/AnswerDotAI/fastws/issues/43))
+
+
 ## 0.0.23
 
 ### New Features
