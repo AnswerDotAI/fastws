@@ -1,5 +1,12 @@
 <!-- do not remove -->
 
+## 0.0.25
+
+### New Features
+
+- Make fastws build backend usable without native-binaries: skip binary staging and treat maturin data dir as optional unless enabled ([#45](https://github.com/AnswerDotAI/fastws/issues/45))
+
+
 ## 0.0.24
 
 ### New Features
