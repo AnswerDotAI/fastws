@@ -1,4 +1,4 @@
-r"Maturin build backend that includes Cargo binaries in Python wheels."
+r"Maturin build backend whose editable installs compile no Rust, and whose wheels can include Cargo binaries."
 import argparse, base64, csv, hashlib, io
 from pathlib import Path
 from tempfile import TemporaryDirectory
@@ -8,13 +8,15 @@ from .cargo import settings, stage_binaries
 
 
 def _stage(config_settings):
+    root = Path.cwd()
+    tool = settings(root)
+    if not tool.get('fastws', {}).get('native-binaries'): return
     parser = argparse.ArgumentParser(add_help=False)
     parser.add_argument('--profile')
     parser.add_argument('--release', action='store_true')
     parser.add_argument('--target')
     args, _ = parser.parse_known_args(maturin.get_maturin_pep517_args(config_settings))
-    root = Path.cwd()
-    profile = args.profile or ('release' if args.release else settings(root)['maturin'].get('profile', 'release'))
+    profile = args.profile or ('release' if args.release else tool['maturin'].get('profile', 'release'))
     stage_binaries(root, profile, args.target)
 
 
@@ -46,7 +48,7 @@ def build_editable(wheel_directory, config_settings=None, metadata_directory=Non
 
 
 def prepare_metadata_for_build_wheel(metadata_directory, config_settings=None):
-    (Path.cwd()/settings(Path.cwd())['maturin']['data']).mkdir(parents=True, exist_ok=True)
+    if data := settings(Path.cwd())['maturin'].get('data'): (Path.cwd()/data).mkdir(parents=True, exist_ok=True)
     return maturin.prepare_metadata_for_build_wheel(metadata_directory, config_settings)
 
 
