@@ -191,6 +191,8 @@ Set `native-binaries = true` under `[tool.fastws]` to build and install the bina
 
 `cargo develop` also copies the `data/` subdirectory of `[tool.maturin].data` into the active venv, as a wheel install does. For example, `data/share/jupyter/kernels/<name>/kernel.json` is installed as `share/jupyter/kernels/<name>/kernel.json`, where Jupyter finds the kernel. `cargo develop` installs the binaries it builds, not the staged copies in `scripts/`.
 
+Each Cargo build that fastws runs holds a shared `flock` on `/tmp/aai-ws-timing.lock`. A speed test that takes that lock exclusively then never times code while a build runs. A build waits up to 5 minutes for such a timing to finish, then goes ahead without the lock. Python code takes the same lock with `fastws.cargo.timing_lock`: `with timing_lock(exclusive=True):` around a timing, and `with timing_lock():` around a test run. An exclusive hold that has waited 30 seconds prints the processes that have the lock's file open. It raises `TimeoutError` after 5 minutes.
+
 Use `fastws.build_backend` as the build backend of a mixed project, and include `fastws-cli>=0.0.25` alongside maturin in `[build-system].requires`. Its editable builds install only Python metadata and the source path, and compile no Rust. `ws-sync` then runs `cargo develop` to build and install the extension, the binaries and the wheel data files. After standalone `uv sync`, run `cargo develop` yourself.
 
 For distribution wheels containing the binaries, also set `[tool.maturin].data` to a generated wheel-data directory. With `native-binaries = true`, wheel builds through the backend replace its `scripts/` subdirectory with the current Python-free binaries, then delegate packaging to maturin. Explicit profile and target arguments from maturin's build settings also apply to the binaries. Without `native-binaries`, wheel builds go straight to maturin, and `[tool.maturin].data` is optional.
@@ -201,6 +203,17 @@ Direct maturin CLI builds bypass the Python build backend. Stage the binaries fi
 cargo stage --profile dist
 maturin build --profile dist
 ```
+
+### `cargo wait`
+
+Wait until a Cargo workspace compiles:
+
+```bash
+cargo wait
+cargo wait --path /path/to/workspace
+```
+
+Use it when another process's unfinished edits stop the workspace compiling, such as a second agent working in the same tree. Each check runs `cargo check --all-targets` while holding the timing lock shared, as builds do. After a failed check, `cargo wait` prints Cargo's first error line. It checks again once a source file of a local package changes and then stays unchanged for 2 seconds. Local packages are the workspace's members and its path dependencies, such as a sibling crate that `ws-sync` patches in. When a check passes, it prints `compiles` and exits. After `--patience` seconds, 1800 by default, it prints the last check's errors and exits with status 1.
 
 ### `ws-sync`
 

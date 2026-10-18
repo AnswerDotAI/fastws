@@ -1,9 +1,10 @@
 "Fast workspace tools for multi-repo management."
 
-__all__ = ["ws_setup", "ws_clone", "ws_pull", "ws_status", "ws_branches", "ws_build", "ws_sync", "ws_add", "ws_remove", "cargo_develop", "cargo_stage"]
+__all__ = ["ws_setup", "ws_clone", "ws_pull", "ws_status", "ws_branches", "ws_build", "ws_sync", "ws_add", "ws_remove", "cargo_develop", "cargo_stage", "cargo_wait"]
 
 import ast, fnmatch, glob, hashlib, json, os, re, shlex, shutil, subprocess, sys, time
 from pathlib import Path
+from contextlib import contextmanager
 from concurrent.futures import ThreadPoolExecutor
 
 from fastcore.parallel import parallel_async_gen
@@ -556,6 +557,14 @@ def _build_projects(root: Path, repos_file: str, project: str = None) -> list[tu
     dirs = dep_closure(key, graph)
     return [(n,d) for n,d in res if d in dirs]
 
+@contextmanager
+def _quietly():
+    "Exit without a traceback where a command fails or a project lacks a setting. A failed command exits with its status. Use this only where the command printed its own errors. A missing setting prints its message and exits with status 1."
+    from .cargo import ConfigError
+    try: yield
+    except subprocess.CalledProcessError as e: raise SystemExit(e.returncode) from None
+    except ConfigError as e: raise SystemExit(str(e)) from None
+
 @call_parse(pos=['command'])
 def cargo_develop(
     command: str = 'develop', # Subcommand name supplied by Cargo
@@ -563,7 +572,7 @@ def cargo_develop(
 ):
     r"Build and install a mixed Rust/Python project's extension and opted-in binaries."
     from .cargo import develop
-    develop(Path(path).resolve())
+    with _quietly(): develop(Path(path).resolve())
 
 @call_parse(pos=['command'])
 def cargo_stage(
@@ -574,7 +583,33 @@ def cargo_stage(
 ):
     r"Stage Python-free native binaries for maturin wheel builds."
     from .cargo import stage_binaries
-    for dest in stage_binaries(Path(path).resolve(), profile or None, target or None): print(f'Staged {dest}')
+    with _quietly():
+        for dest in stage_binaries(Path(path).resolve(), profile or None, target or None): print(f'Staged {dest}')
+
+def _newest(paths):
+    "Newest file mtime among `paths`, walking each directory as `_src_mtime` does"
+    return max((_src_mtime(p) if p.is_dir() else p.stat().st_mtime) for p in paths if p.exists())
+
+@call_parse(pos=['command'])
+def cargo_wait(
+    command: str = 'wait', # Subcommand name supplied by Cargo
+    path: str = '.', # Cargo workspace directory
+    patience: int = 1800, # Seconds to wait before giving up
+):
+    r"Wait until a Cargo workspace compiles, checking again after each edit to its local packages' sources."
+    from .cargo import check, sources
+    root, start = Path(path).resolve(), time.monotonic()
+    with _quietly(): srcs = sources(root)
+    while (res := check(root)).returncode:
+        if time.monotonic() - start > patience: raise SystemExit(f'{res.stderr}gave up after {patience} s')
+        print(next((l for l in res.stderr.splitlines() if 'error' in l), 'cargo check failed'), file=sys.stderr)
+        before = _newest(srcs)
+        while (now := _newest(srcs)) == before and time.monotonic() - start < patience: time.sleep(1)
+        while True:
+            time.sleep(2)
+            if (later := _newest(srcs)) == now: break
+            now = later
+    print('compiles')
 
 @call_parse
 def ws_build(
@@ -898,58 +933,60 @@ async def ws_sync(
     upgrade: bool = False,  # Force the once-daily dependency upgrade pass
 ):
     "Pull the workspace baseline, clone missing shared/local repos, then pull projects and sync; upgrade dependencies daily."
-    root = _ws_root(workspace, repos_file, pyproject_file, template_file)
-    repos_path = _resolve_path(root, repos_file)
-    pyproject_path = _resolve_path(root, pyproject_file)
-    template_path = _resolve_path(root, template_file)
-    await _pull_workspace(root)
-    entries = _load_repo_entries(repos_path, root)
-    await _clone_repos(entries, workers)
-    repos = await _discover_ws_repos(root)
-
-    if missing_repos := _update_repos_file(repos_path, repos): print(f"Added local repos: {', '.join(missing_repos)}")
-    entries = _load_repo_entries(repos_path, root)
-    ext_dirs = [d for _,d,_ in entries if d.resolve().parent != root.resolve()]
-    dirs = [d for _,d,_ in entries]
-    try: dirs = await _changed_dirs(dirs)
-    except Exception: pass
-    await _pull(dirs, workers=workers)
-
-    if not pyproject_path.exists(): _sync_ws_pyproject(pyproject_path, template_path, [])
-    added_ex, removed_ex = _sync_ws_excludes(pyproject_path, root, {d.name for _,d,_ in entries if d.resolve().parent == root.resolve()})
-    if added_ex: print(f"Auto-excluded from the workspace: {', '.join(added_ex)}")
-    if removed_ex: print(f"No longer excluded from the workspace: {', '.join(removed_ex)}")
-
-    missing_projects = _sync_ws_pyproject(pyproject_path, template_path, _ws_projects(root), _external_projects(root, ext_dirs),
-        _repo_extras(root, entries))
-    if missing_projects: print(f"Added workspace projects: {', '.join(missing_projects)}")
-    projects = _build_projects(root, repos_file)
-    _sync_build_isolation(pyproject_path, projects)
-
-    wrapper_added = _sync_cargo_wrapper(root)
-    added_p, removed_p = _sync_cargo_patches(root)
-    if added_p: print(f"Cargo patches added: {', '.join(added_p)}")
-    if removed_p: print(f"Cargo patches removed: {', '.join(removed_p)}")
-    if wrapper_added: print("Cargo builds now use sccache")
-
-    js_members = _npm_dirs(root)
-    if _native_js(js_members): _check_rustup()
-    added_j, removed_j = _sync_ws_package_json(root, js_members)
-    if added_j: print(f"JS workspace packages added: {', '.join(added_j)}")
-    if removed_j: print(f"JS workspace packages removed: {', '.join(removed_j)}")
-
-    if bad := _pending_dirs(root):
-        print(f"⚠️  Skipping uv sync, not Python projects yet (scaffold with e.g. nbdev-new or ship-new, or remove): {', '.join(bad)}")
-        return
-    up = upgrade or _should_upgrade(root)
-    if up: _cargo_update(root, workers=workers)
-    _sync_cargo_keys(root)
-    subprocess.run(["uv", "sync", "-U"] if up else ["uv", "sync"], check=True, cwd=root)
-    for _,d in projects:
-        cfg = tomllib.loads((d/'pyproject.toml').read_text()).get('tool', {}).get('maturin', {})
-        if 'python-source' in cfg and cfg.get('bindings') != 'bin': cargo_develop(path=str(d))
-    if up: _upgrade_stamp(root).touch()
-    if js_members: _sync_js(root, js_members)
+    with _quietly():
+        root = _ws_root(workspace, repos_file, pyproject_file, template_file)
+        repos_path = _resolve_path(root, repos_file)
+        pyproject_path = _resolve_path(root, pyproject_file)
+        template_path = _resolve_path(root, template_file)
+        await _pull_workspace(root)
+        entries = _load_repo_entries(repos_path, root)
+        await _clone_repos(entries, workers)
+        repos = await _discover_ws_repos(root)
+    
+        if missing_repos := _update_repos_file(repos_path, repos): print(f"Added local repos: {', '.join(missing_repos)}")
+        entries = _load_repo_entries(repos_path, root)
+        ext_dirs = [d for _,d,_ in entries if d.resolve().parent != root.resolve()]
+        dirs = [d for _,d,_ in entries]
+        try: dirs = await _changed_dirs(dirs)
+        except Exception: pass
+        await _pull(dirs, workers=workers)
+    
+        if not pyproject_path.exists(): _sync_ws_pyproject(pyproject_path, template_path, [])
+        added_ex, removed_ex = _sync_ws_excludes(pyproject_path, root, {d.name for _,d,_ in entries if d.resolve().parent == root.resolve()})
+        if added_ex: print(f"Auto-excluded from the workspace: {', '.join(added_ex)}")
+        if removed_ex: print(f"No longer excluded from the workspace: {', '.join(removed_ex)}")
+    
+        missing_projects = _sync_ws_pyproject(pyproject_path, template_path, _ws_projects(root), _external_projects(root, ext_dirs),
+            _repo_extras(root, entries))
+        if missing_projects: print(f"Added workspace projects: {', '.join(missing_projects)}")
+        projects = _build_projects(root, repos_file)
+        _sync_build_isolation(pyproject_path, projects)
+    
+        wrapper_added = _sync_cargo_wrapper(root)
+        added_p, removed_p = _sync_cargo_patches(root)
+        if added_p: print(f"Cargo patches added: {', '.join(added_p)}")
+        if removed_p: print(f"Cargo patches removed: {', '.join(removed_p)}")
+        if wrapper_added: print("Cargo builds now use sccache")
+    
+        js_members = _npm_dirs(root)
+        if _native_js(js_members): _check_rustup()
+        added_j, removed_j = _sync_ws_package_json(root, js_members)
+        if added_j: print(f"JS workspace packages added: {', '.join(added_j)}")
+        if removed_j: print(f"JS workspace packages removed: {', '.join(removed_j)}")
+    
+        if bad := _pending_dirs(root):
+            print(f"⚠️  Skipping uv sync, not Python projects yet (scaffold with e.g. nbdev-new or ship-new, or remove): {', '.join(bad)}")
+            return
+        up = upgrade or _should_upgrade(root)
+        if up: _cargo_update(root, workers=workers)
+        _sync_cargo_keys(root)
+        subprocess.run(["uv", "sync", "-U"] if up else ["uv", "sync"], check=True, cwd=root)
+        from .cargo import develop
+        for _,d in projects:
+            cfg = tomllib.loads((d/'pyproject.toml').read_text()).get('tool', {}).get('maturin', {})
+            if 'python-source' in cfg and cfg.get('bindings') != 'bin': develop(d.resolve())
+        if up: _upgrade_stamp(root).touch()
+        if js_members: _sync_js(root, js_members)
 
 @call_parse
 async def ws_add(

@@ -36,6 +36,7 @@ dev = [
 [project.scripts]
 cargo-develop = "fastws.core:cargo_develop"
 cargo-stage = "fastws.core:cargo_stage"
+cargo-wait = "fastws.core:cargo_wait"
 ws-setup = "fastws.core:ws_setup"
 ws-clone = "fastws.core:ws_clone"
 ws-pull = "fastws.core:ws_pull"
