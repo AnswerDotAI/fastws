@@ -1,5 +1,12 @@
 <!-- do not remove -->
 
+## 0.0.26
+
+### New Features
+
+- Add cargo wait command and `timing_lock` that keeps builds and timings apart; exit cleanly on Cargo failures and missing config settings ([#46](https://github.com/AnswerDotAI/fastws/issues/46))
+
+
 ## 0.0.25
 
 ### New Features
