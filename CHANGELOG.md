@@ -1,5 +1,12 @@
 <!-- do not remove -->
 
+## 0.0.27
+
+### New Features
+
+- Add cargo `run_tests` with parsed results and diagnostics, prefix build messages by package, expand ~ in paths, show stderr on CLI errors ([#47](https://github.com/AnswerDotAI/fastws/issues/47))
+
+
 ## 0.0.26
 
 ### New Features
