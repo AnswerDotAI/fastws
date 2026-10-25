@@ -558,11 +558,13 @@ def _build_projects(root: Path, repos_file: str, project: str = None) -> list[tu
     return [(n,d) for n,d in res if d in dirs]
 
 @contextmanager
-def _quietly():
-    "Exit without a traceback where a command fails or a project lacks a setting. A failed command exits with its status. Use this only where the command printed its own errors. A missing setting prints its message and exits with status 1."
+def _cli_errors():
+    "Exit without a traceback on command failures or missing settings, printing captured stderr and preserving command exit status."
     from .cargo import ConfigError
     try: yield
-    except subprocess.CalledProcessError as e: raise SystemExit(e.returncode) from None
+    except subprocess.CalledProcessError as e:
+        if e.stderr: print(e.stderr, file=sys.stderr, end='')
+        raise SystemExit(e.returncode) from None
     except ConfigError as e: raise SystemExit(str(e)) from None
 
 @call_parse(pos=['command'])
@@ -572,7 +574,7 @@ def cargo_develop(
 ):
     r"Build and install a mixed Rust/Python project's extension and opted-in binaries."
     from .cargo import develop
-    with _quietly(): develop(Path(path).resolve())
+    with _cli_errors(): develop(Path(path).resolve())
 
 @call_parse(pos=['command'])
 def cargo_stage(
@@ -583,7 +585,7 @@ def cargo_stage(
 ):
     r"Stage Python-free native binaries for maturin wheel builds."
     from .cargo import stage_binaries
-    with _quietly():
+    with _cli_errors():
         for dest in stage_binaries(Path(path).resolve(), profile or None, target or None): print(f'Staged {dest}')
 
 def _newest(paths):
@@ -597,12 +599,12 @@ def cargo_wait(
     patience: int = 1800, # Seconds to wait before giving up
 ):
     r"Wait until a Cargo workspace compiles, checking again after each edit to its local packages' sources."
-    from .cargo import check, sources
+    from .cargo import check, diagnostics, sources
     root, start = Path(path).resolve(), time.monotonic()
-    with _quietly(): srcs = sources(root)
+    with _cli_errors(): srcs = sources(root)
     while (res := check(root)).returncode:
         if time.monotonic() - start > patience: raise SystemExit(f'{res.stderr}gave up after {patience} s')
-        print(next((l for l in res.stderr.splitlines() if 'error' in l), 'cargo check failed'), file=sys.stderr)
+        print(next((str(d) for d in diagnostics(res.stderr) if d.level == 'error'), res.stderr.strip() or 'cargo check failed'), file=sys.stderr)
         before = _newest(srcs)
         while (now := _newest(srcs)) == before and time.monotonic() - start < patience: time.sleep(1)
         while True:
@@ -933,7 +935,7 @@ async def ws_sync(
     upgrade: bool = False,  # Force the once-daily dependency upgrade pass
 ):
     "Pull the workspace baseline, clone missing shared/local repos, then pull projects and sync; upgrade dependencies daily."
-    with _quietly():
+    with _cli_errors():
         root = _ws_root(workspace, repos_file, pyproject_file, template_file)
         repos_path = _resolve_path(root, repos_file)
         pyproject_path = _resolve_path(root, pyproject_file)

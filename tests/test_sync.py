@@ -24,6 +24,17 @@ def mk_repo(d, origin=None):
     return g
 
 
+@pytest.mark.asyncio
+async def test_sync_reports_workspace_pull_failure(tmp_path, capsys):
+    g = mk_repo(tmp_path, origin=tmp_path/'origin')
+    g.config('pull.rebase', 'true')
+    g.config('rebase.autoStash', 'false')
+    (tmp_path/'f.txt').write_text('dirty')
+    with pytest.raises(SystemExit) as e: await core.ws_sync(workspace=str(tmp_path))
+    assert e.value.code != 0
+    assert 'cannot pull with rebase' in capsys.readouterr().err
+
+
 def test_repos_file_roundtrip(tmp_path):
     repos_path = tmp_path/'repos.txt'
     repos_path.write_text('# header\nAnswerDotAI/fastws[dev]\njph00/private[docs] ~/private\nfastai/fastai sub/dir\n')
