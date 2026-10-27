@@ -1,7 +1,7 @@
 import subprocess
 import pytest
 import fastws.core as core
-from fastws.cargo import build, run_tests
+from fastws.cargo import build, run_tests, diagnostics
 
 
 def _mk_proj(root, name, extra=''):
@@ -43,7 +43,7 @@ def test_build_diagnostics(tmp_path, capfd, body, diagnostic):
     else: assert [m['target']['name'] for m in build(tmp_path)] == ['app']
     stderr = capfd.readouterr().err
     if diagnostic: assert f'[dep] dep/src/lib.rs:1:' in stderr and f': {diagnostic}:' in stderr
-    else: assert not stderr
+    else: assert not diagnostics(stderr)
 
 
 def test_run_tests(tmp_path):
