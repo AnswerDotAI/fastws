@@ -1,5 +1,12 @@
 <!-- do not remove -->
 
+## 0.0.28
+
+### New Features
+
+- Add ws-news command to summarize recent GitHub releases or default-branch commits across workspace repos with LLM, with --since-last checkpoints ([#48](https://github.com/AnswerDotAI/fastws/issues/48))
+
+
 ## 0.0.27
 
 ### New Features
