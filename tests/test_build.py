@@ -1,6 +1,4 @@
-import subprocess
-import pytest
-import fastws.core as core
+import subprocess, pytest, fastws.core as core
 from fastws.cargo import build, run_tests, diagnostics
 
 

@@ -22,7 +22,7 @@ dependencies = [
   "packaging",
   "python-fastllm",
   "rich",
-  "maturin>=1.9.4,<2.0",
+  "maturin>=1.13,<2.0",
   "tomli; python_version < '3.11'",
 ]
 

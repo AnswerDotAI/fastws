@@ -191,7 +191,34 @@ def sources(root):
     return res
 
 
-def build(root, *, library=True, binaries=False, profile=None, target=None, no_default_features=False):
+def _maturin_flags(target, env):
+    "Maturin's macOS linker flags without replacing existing compiler flags."
+    target = target or env.get('CARGO_BUILD_TARGET')
+    if not (target.endswith('-apple-darwin') if target else sys.platform == 'darwin'): return [], None
+    link_args = ['link-arg=-undefined', 'link-arg=dynamic_lookup']
+    if 'CARGO_ENCODED_RUSTFLAGS' in env:
+        flags = env['CARGO_ENCODED_RUSTFLAGS'].split('\x1f') if env['CARGO_ENCODED_RUSTFLAGS'] else []
+    elif 'RUSTFLAGS' in env: flags = env['RUSTFLAGS'].split()
+    else:
+        flags = [arg for flag in link_args for arg in ('-C', flag)]
+        return ['--config', 'build.rustflags=' + json.dumps(flags)], None
+    for flag in link_args:
+        if flag not in flags and '-C'+flag not in flags: flags += ['-C', flag]
+    return [], dict(env, CARGO_ENCODED_RUSTFLAGS='\x1f'.join(flags))
+
+
+def build(
+    root, # The project directory, whose `tool.maturin` gives the defaults (expands `~`)
+    *,
+    library=True, # Build the library target?
+    binaries=False, # Build the binary targets?
+    profile=None, # Cargo profile; None: `tool.maturin.profile`, or Cargo's default
+    target=None, # Target triple; None: the host
+    features=None, # Features to enable, as a list or a string; None: `tool.maturin.features`
+    all_features=False, # Enable every feature? `tool.maturin`'s `all-features` also turns this on
+    no_default_features=False, # Leave out the default features? `tool.maturin`'s `no-default-features` also turns this on
+    for_maturin=False, # Use the macOS linker flags that maturin's own wheel build uses?
+):
     "Build with Cargo and return the compiler artifacts of the workspace's packages."
     root = Path(root).expanduser()
     cfg = settings(root)['maturin']
@@ -200,12 +227,12 @@ def build(root, *, library=True, binaries=False, profile=None, target=None, no_d
     if binaries: cmd.append('--bins')
     if profile := profile or cfg.get('profile'): cmd += ['--profile', profile]
     if target: cmd += ['--target', target]
-    if no_default_features: cmd.append('--no-default-features')
-    else:
-        if features := cfg.get('features'): cmd += ['--features', ','.join(features)]
-        for flag in ('all-features', 'no-default-features'):
-            if cfg.get(flag): cmd.append('--' + flag)
-    with timing_lock(): result = subprocess.run(['cargo', *cmd], cwd=root, stdout=subprocess.PIPE, text=True)
+    if features := features or cfg.get('features'):
+        cmd += ['--features', features if isinstance(features, str) else ','.join(features)]
+    for flag, active in [('all-features', all_features), ('no-default-features', no_default_features)]:
+        if active or cfg.get(flag): cmd.append('--' + flag)
+    extra, env = _maturin_flags(target, os.environ) if for_maturin else ([], None)
+    with timing_lock(): result = subprocess.run(['cargo', *cmd, *extra], cwd=root, stdout=subprocess.PIPE, text=True, env=env)
     messages = [json.loads(line) for line in result.stdout.splitlines()]
     for m in messages:
         if m.get('reason') != 'compiler-message': continue
@@ -250,12 +277,13 @@ def develop(root):
             if f.is_file(): replace(f, env/f.relative_to(data))
 
 
-def stage_binaries(root, profile=None, target=None):
-    "Stage Python-free Cargo binaries in maturin's wheel-data directory."
+def stage_binaries(root, profile=None, target=None, features=None, all_features=False, no_default_features=False):
+    "Stage Python-free Cargo binaries for a maturin wheel build."
     root = Path(root).expanduser()
     cfg = settings(root)['maturin']
     if 'data' not in cfg: raise ConfigError(r'staging native binaries requires tool.maturin.data')
     dest = root/cfg['data']/'scripts'
-    artifacts = build(root, library=False, binaries=True, profile=profile, target=target, no_default_features=True)
+    artifacts = build(root, library=False, binaries=True, profile=profile, target=target, features=features,
+        all_features=all_features, no_default_features=no_default_features, for_maturin=True)
     if dest.exists(): shutil.rmtree(dest)
     return [replace(m['executable'], dest/Path(m['executable']).name) for m in artifacts if m.get('executable')]

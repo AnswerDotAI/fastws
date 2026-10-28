@@ -582,11 +582,15 @@ def cargo_stage(
     path: str = '.', # Rust/Python project directory
     profile: str = '', # Cargo profile; defaults to the maturin profile or dev
     target: str = '', # Cargo target triple
+    features: str = '', # Space or comma separated Cargo features
+    all_features: bool = False, # Enable all Cargo features
+    no_default_features: bool = False, # Disable default Cargo features
 ):
     r"Stage Python-free native binaries for maturin wheel builds."
     from .cargo import stage_binaries
     with _cli_errors():
-        for dest in stage_binaries(Path(path).resolve(), profile or None, target or None): print(f'Staged {dest}')
+        for dest in stage_binaries(Path(path).resolve(), profile or None, target or None, features,
+            all_features, no_default_features): print(f'Staged {dest}')
 
 def _newest(paths):
     "Newest file mtime among `paths`, walking each directory as `_src_mtime` does"

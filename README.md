@@ -193,9 +193,9 @@ Set `native-binaries = true` under `[tool.fastws]` to build and install the bina
 
 Each Cargo build that fastws runs holds a shared `flock` on `/tmp/aai-ws-timing.lock`. A speed test that takes that lock exclusively then never times code while a build runs. A build waits up to 5 minutes for such a timing to finish, then goes ahead without the lock. Python code takes the same lock with `fastws.cargo.timing_lock`: `with timing_lock(exclusive=True):` around a timing, and `with timing_lock():` around a test run. An exclusive hold that has waited 30 seconds prints the processes that have the lock's file open. It raises `TimeoutError` after 5 minutes.
 
-Use `fastws.build_backend` as the build backend of a mixed project, and include `fastws-cli>=0.0.25` alongside maturin in `[build-system].requires`. Its editable builds install only Python metadata and the source path, and compile no Rust. `ws-sync` then runs `cargo develop` to build and install the extension, the binaries and the wheel data files. After standalone `uv sync`, run `cargo develop` yourself.
+Use `fastws.build_backend` as the build backend of a mixed project, and include `fastws-cli>=0.0.29` alongside `maturin>=1.13,<2.0` in `[build-system].requires`. Its editable builds install only Python metadata and the source path, and compile no Rust. `ws-sync` then runs `cargo develop` to build and install the extension, the binaries and the wheel data files. After standalone `uv sync`, run `cargo develop` yourself.
 
-For distribution wheels containing the binaries, also set `[tool.maturin].data` to a generated wheel-data directory. With `native-binaries = true`, wheel builds through the backend replace its `scripts/` subdirectory with the current Python-free binaries, then delegate packaging to maturin. Explicit profile and target arguments from maturin's build settings also apply to the binaries. Without `native-binaries`, wheel builds go straight to maturin, and `[tool.maturin].data` is optional.
+For distribution wheels containing the binaries, also set `[tool.maturin].data` to a generated wheel-data directory. With `native-binaries = true`, wheel builds through the backend replace its `scripts/` subdirectory with the current Python-free binaries, then delegate packaging to maturin. Explicit profile, target and feature arguments from maturin's build settings also apply to the binaries. Without `native-binaries`, wheel builds go straight to maturin, and `[tool.maturin].data` is optional.
 
 Direct maturin CLI builds bypass the Python build backend. Stage the binaries first with the shared command:
 
@@ -203,6 +203,8 @@ Direct maturin CLI builds bypass the Python build backend. Stage the binaries fi
 cargo stage --profile dist
 maturin build --profile dist
 ```
+
+Pass the same target and feature flags to both commands, including `--no-default-features` when needed. Staging builds binaries only. On macOS it matches Maturin's linker flags through `build.rustflags` or existing `RUSTFLAGS`/`CARGO_ENCODED_RUSTFLAGS`. A macOS target with its own `rustflags` must include `-C link-arg=-undefined -C link-arg=dynamic_lookup` there. Shared crates are reused when the two builds resolve the same dependency features. Adding `--lib` to staging can select a different compilation profile under LTO.
 
 ### `cargo wait`
 

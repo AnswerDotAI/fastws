@@ -13,11 +13,14 @@ def _stage(config_settings):
     if not tool.get('fastws', {}).get('native-binaries'): return
     parser = argparse.ArgumentParser(add_help=False)
     parser.add_argument('--profile')
-    parser.add_argument('--release', action='store_true')
+    parser.add_argument('--release', '-r', action='store_true')
     parser.add_argument('--target')
+    parser.add_argument('--features', '-F', action='append')
+    parser.add_argument('--all-features', action='store_true')
+    parser.add_argument('--no-default-features', action='store_true')
     args, _ = parser.parse_known_args(maturin.get_maturin_pep517_args(config_settings))
     profile = args.profile or ('release' if args.release else tool['maturin'].get('profile', 'release'))
-    stage_binaries(root, profile, args.target)
+    stage_binaries(root, profile, args.target, args.features, args.all_features, args.no_default_features)
 
 
 def build_wheel(wheel_directory, config_settings=None, metadata_directory=None):
