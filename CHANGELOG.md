@@ -1,5 +1,12 @@
 <!-- do not remove -->
 
+## 0.0.31
+
+### New Features
+
+- Make `timing_lock` a no-op on Windows and import fcntl only on Unix, so Windows Cargo builds skip the timing lock ([#50](https://github.com/AnswerDotAI/fastws/issues/50))
+
+
 ## 0.0.30
 
 ### New Features
