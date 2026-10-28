@@ -1,5 +1,5 @@
 r"Build, test and install Cargo artifacts for mixed Rust/Python projects."
-import fcntl, json, os, re, shutil, subprocess, sys, sysconfig, time
+import json, os, re, shutil, subprocess, sys, sysconfig, time
 from collections import Counter
 from contextlib import contextmanager
 from dataclasses import dataclass
@@ -45,7 +45,11 @@ def _lock_users():
 def timing_lock(
     exclusive=False, # Take the lock exclusively, as a timing does; False: take it shared, as a build or a test run does
 ):
-    "Hold the lock that keeps this machine's timings apart from its builds and test runs. A hold waits up to 5 minutes for the lock. After that, a shared hold goes ahead without it. An exclusive hold raises `TimeoutError`. An exclusive hold that has waited 30 seconds prints, once, the other processes that have the lock's file open."
+    "Hold the Unix lock that keeps this machine's timings apart from its builds and test runs; a no-op on Windows. A hold waits up to 5 minutes for the lock. After that, a shared hold goes ahead without it. An exclusive hold raises `TimeoutError`. An exclusive hold that has waited 30 seconds prints, once, the other processes that have the lock's file open."
+    if os.name == 'nt':
+        yield
+        return
+    import fcntl
     with open(_TIMING_LOCK, 'a') as f:
         start, waiting, reported = time.monotonic(), False, False
         while True:
