@@ -1,5 +1,12 @@
 <!-- do not remove -->
 
+## 0.0.29
+
+### New Features
+
+- Pass maturin feature flags and macOS linker flags to staged binary builds ([#49](https://github.com/AnswerDotAI/fastws/issues/49))
+
+
 ## 0.0.28
 
 ### New Features
