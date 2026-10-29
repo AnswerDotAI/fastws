@@ -85,6 +85,11 @@ def _ws_root(workspace: str = "", repos_file: str = "repos.txt", pyproject_file:
         if any(_resolve_path(root, p).exists() for p in paths): return root
     return Path.cwd().resolve()
 
+def _ws_entries(repos_file: str) -> list[tuple[str, Path, set[str]]]:
+    "Repo entries of the workspace `_ws_root` finds, with `repos_file` relative to it"
+    root = _ws_root(repos_file=repos_file)
+    return _load_repo_entries(_resolve_path(root, repos_file), root)
+
 def _parse_github_repo(remote: str) -> str|None:
     m = re.search(r"github\.com[:/](?P<owner>[^/]+)/(?P<repo>[^/]+?)(?:\.git)?/?$", remote.strip())
     return f"{m['owner']}/{m['repo']}" if m else None
@@ -467,7 +472,7 @@ async def ws_clone(
     workers: int = 16,  # Number of parallel workers
 ):
     "Clone missing repos from the shared and local repo lists."
-    entries = _load_repo_entries(repos_file, Path("."))
+    entries = _ws_entries(repos_file)
     await _clone_repos(entries, workers)
 
 @call_parse
@@ -476,7 +481,7 @@ async def ws_pull(
     workers: int = 64,  # Number of parallel workers
 ):
     "Pull updates for repos whose GitHub origin has moved (all repos when that can't be checked)."
-    dirs = [d for _,d,_ in _load_repo_entries(repos_file, Path("."))]
+    dirs = [d for _,d,_ in _ws_entries(repos_file)]
     try: dirs = await _changed_dirs(dirs)
     except Exception: pass
     await _pull(dirs, workers)
@@ -487,7 +492,7 @@ def ws_status(
     branches: bool = False,  # Show unpushed commit details
 ):
     "Show uncommitted changes and optionally unpushed commit details across repos."
-    for repo,d,_ in _load_repo_entries(repos_file, Path(".")):
+    for repo,d,_ in _ws_entries(repos_file):
         if not d.exists(): continue
         g = Git(d)
         if not g.exists: continue
@@ -508,7 +513,7 @@ def ws_branches(
     expected: str = "main",  # Expected branch name
 ):
     "Check if all repos are on the expected branch."
-    for repo,d,_ in _load_repo_entries(repos_file, Path(".")):
+    for repo,d,_ in _ws_entries(repos_file):
         if not Path(d).exists():
             print(f"⚠️  {d}: directory not found")
             continue
