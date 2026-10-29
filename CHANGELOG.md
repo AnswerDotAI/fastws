@@ -1,5 +1,12 @@
 <!-- do not remove -->
 
+## 0.0.32
+
+### New Features
+
+- Add post-develop-module setting to run a generator module after installing extension and binaries in cargo develop ([#51](https://github.com/AnswerDotAI/fastws/issues/51))
+
+
 ## 0.0.31
 
 ### New Features
