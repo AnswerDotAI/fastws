@@ -257,7 +257,7 @@ def replace(source, destination):
 
 
 def develop(root):
-    "Install a Python extension, opted-in binaries and wheel data files from one Cargo build."
+    "Install a Python extension, opted-in binaries and wheel data, running the project's post-develop module before wheel data."
     root = Path(root).expanduser()
     tool = settings(root)
     cfg = tool['maturin']
@@ -274,6 +274,8 @@ def develop(root):
         scripts = env/('Scripts' if os.name == 'nt' else 'bin')
         for m in artifacts:
             if m.get('executable'): replace(m['executable'], scripts/Path(m['executable']).name)
+    if generator := tool.get('fastws', {}).get('post-develop-module'):
+        subprocess.run([sys.executable, '-m', generator], cwd=root, check=True)
     # Editable builds through `build_backend` don't install the wheel's data files, which a wheel install puts under the prefix.
     if 'data' in cfg:
         data = root/cfg['data']/'data'
