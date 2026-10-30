@@ -726,7 +726,7 @@ def _entry_changes(current, new):
     return [k for k in new if k not in current], [k for k in current if k not in new]
 
 def _sync_cargo_patches(root: Path) -> tuple[list[str], list[str]]:
-    """Regenerate `[patch]` entries in the workspace `.cargo/config.toml` and return (added, removed).
+    """Regenerate workspace Cargo patches, default to quiet output, and return (added, removed).
 
     Every local crate gets a `[patch.crates-io]` entry, except one marked `publish = false`, which never comes
     from crates.io. A member's git dep on a local crate gets an entry under that URL. Builds anywhere under `root`
@@ -739,8 +739,13 @@ def _sync_cargo_patches(root: Path) -> tuple[list[str], list[str]]:
     desired = {"crates-io": {pkg["name"]: str(d) for pkg, d in pkgs if pkg.get("publish") is not False}}
     for url, entries in _git_dep_tables(root, crates).items(): desired[url] = {name: str(d) for name, d in entries.items()}
     config = root/".cargo"/"config.toml"
-    content = config.read_text() if config.exists() else ""
-    old = tomllib.loads(content).get("patch", {}) if content else {}
+    original = content = config.read_text() if config.exists() else ""
+    data = tomllib.loads(content) if content else {}
+    old = data.get("patch", {})
+    if "quiet" not in data.get("term", {}):
+        if match := re.search(r"(?m)^\[term\][^\n]*(?:\n|$)", content):
+            content = content[:match.end()].rstrip("\n") + "\nquiet = true\n" + content[match.end():]
+        else: content = _replace_table(content, "term", "quiet = true").lstrip()
     def inside(spec):
         if not isinstance(spec, dict) or not (p := spec.get("path")): return False
         p = Path(p).expanduser()
@@ -756,7 +761,7 @@ def _sync_cargo_patches(root: Path) -> tuple[list[str], list[str]]:
         + "".join(f"{name} = {_fmt_source(spec)}\n" for name, spec in sorted(entries.items()))
         for url, entries in tables.items() if entries)
     new = (_strip_patch_tables(content).rstrip() + "\n\n" + body).lstrip() + "\n" if body else _strip_patch_tables(content)
-    if new == content: return [], []
+    if new == original: return [], []
     tomllib.loads(new)  # never write an unparseable config
     config.parent.mkdir(exist_ok=True)
     config.write_text(new)
@@ -765,23 +770,41 @@ def _sync_cargo_patches(root: Path) -> tuple[list[str], list[str]]:
     added, removed = _entry_changes(before, after)
     return sorted(added), sorted(removed)
 
-def _sync_cargo_wrapper(root: Path) -> bool:
-    "Add sccache to the generated Cargo config when installed, without overriding another wrapper"
-    config = root/".cargo"/"config.toml"
+# The rustc wrapper that `_sync_cargo_wrapper` writes. It imports only `fastws.timelock`, by its file, so that each rustc call pays for little more than the interpreter's start.
+_RUSTC_LOCK = r"""#!{python} -IS
+# Written by ws-sync. Cargo runs each rustc call through this script, which holds the machine's timing lock shared until rustc ends (`fastws.timelock`){via}.
+import sys
+sys.path.insert(0, {dir!r})
+from timelock import exec_shared
+INNER = {inner!r}  # The wrapper that each rustc call runs through inside the lock, kept by later syncs; None: rustc alone
+exec_shared([INNER, *sys.argv[1:]] if INNER else sys.argv[1:])
+"""
+
+def _sync_cargo_wrapper(root: Path):
+    "Point the generated Cargo config's `rustc-wrapper` at `.cargo/rustc-lock`, written here, which runs each rustc call holding the machine's timing lock shared (`fastws.timelock`). Inside the lock it runs the wrapper that the config named before, where that's another tool's, or else sccache where it's installed. On Windows, where the lock does nothing, the config keeps another tool's wrapper, or else names sccache."
+    config, script = root/".cargo"/"config.toml", root/".cargo"/"rustc-lock"
     content = config.read_text() if config.exists() else ""
-    data = tomllib.loads(content) if content else {}
-    if data.get("build", {}).get("rustc-wrapper"): return False
-    if not (wrapper := shutil.which("sccache")):
+    current = (tomllib.loads(content) if content else {}).get("build", {}).get("rustc-wrapper")
+    if not (sccache := shutil.which("sccache")):
         print("⚠️  sccache not found; Rust builds won't use compiler caching.\n"
               "Install it with: cargo install sccache --locked\nThen rerun ws-sync to enable it.")
-        return False
+    recorded = script.exists() and current == str(script) and re.search(r"(?m)^INNER = (.+?)  #", script.read_text())
+    previous = ast.literal_eval(recorded[1]) if recorded else current
+    inner = previous if previous not in (None, str(script)) else sccache
+    if os.name == "nt": wrapper = inner
+    else:
+        script.parent.mkdir(exist_ok=True)
+        script.write_text(_RUSTC_LOCK.format(python=sys.executable, dir=str(Path(__file__).parent), via=f", through {Path(inner).name}" if inner else "", inner=inner))
+        script.chmod(0o755)
+        wrapper = str(script)
+    if not wrapper or current == wrapper: return
+    content = re.sub(r"(?m)^rustc-wrapper = .*\n", "", content)
     line = f'rustc-wrapper = {json.dumps(wrapper)}\n'
     if match := re.search(r"(?m)^\[build\][^\n]*\n", content): new = content[:match.end()] + line + content[match.end():]
     else: new = content.rstrip() + ("\n\n" if content.strip() else "") + "[build]\n" + line
     tomllib.loads(new)
     config.parent.mkdir(exist_ok=True)
     config.write_text(new)
-    return True
 
 def _cargo_dep_tables(data):
     for name in "dependencies","build-dependencies": yield data.get(name, {})
@@ -968,11 +991,10 @@ async def ws_sync(
         projects = _build_projects(root, repos_file)
         _sync_build_isolation(pyproject_path, projects)
     
-        wrapper_added = _sync_cargo_wrapper(root)
+        _sync_cargo_wrapper(root)
         added_p, removed_p = _sync_cargo_patches(root)
         if added_p: print(f"Cargo patches added: {', '.join(added_p)}")
         if removed_p: print(f"Cargo patches removed: {', '.join(removed_p)}")
-        if wrapper_added: print("Cargo builds now use sccache")
     
         js_members = _npm_dirs(root)
         if _native_js(js_members): _check_rustup()

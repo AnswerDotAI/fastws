@@ -91,6 +91,16 @@ def test_sync_extras_preserves_constraints_markers_and_unrelated_settings(tmp_pa
         assert other == 'other[keep]' and len(data['project']['dependencies']) == 2
         assert data['tool']['uv']['sources'] == {'My_Pkg': {'path': '../somewhere', 'editable': True}}
 
+@pytest.mark.skipif(os.name == 'nt', reason='Windows has no timing lock, so no rustc-lock script')
+def test_rustc_wrapper_keeps_another_tools_wrapper(tmp_path):
+    config, script = tmp_path/'.cargo'/'config.toml', tmp_path/'.cargo'/'rustc-lock'
+    config.parent.mkdir()
+    config.write_text('[build]\nrustc-wrapper = "/opt/custom/wrap"\n')
+    for _ in range(2):
+        core._sync_cargo_wrapper(tmp_path)
+        assert f'rustc-wrapper = "{script}"' in config.read_text()
+        assert "INNER = '/opt/custom/wrap'" in script.read_text()
+
 
 def test_remove_from_pyproject(tmp_path):
     pyproject = tmp_path/'pyproject.toml'

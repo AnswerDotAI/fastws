@@ -172,7 +172,7 @@ ws-build --project solveit  # only this package and its transitive workspace dep
 
 ### `cargo develop`
 
-Rebuild a mixed Rust/Python project's extension and replace it in the editable source package:
+Build a mixed Rust/Python project's extension and opted-in binaries, keep them with its Python package as one build, and install that build in the editable source package and the venv:
 
 ```bash
 cargo develop
@@ -193,7 +193,9 @@ Set `native-binaries = true` under `[tool.fastws]` to build and install the bina
 
 Set `post-develop-module = "package.generator"` under `[tool.fastws]` to run a generator after installing the native extension and binaries, before copying wheel data. It runs with the current Python in a fresh process from the project root, including when Cargo reuses its build. A failure stops `cargo develop` or `ws-sync`. Use it for generated files that need the rebuilt extension's metadata.
 
-On Unix, each Cargo build that fastws runs holds a shared `flock` on `/tmp/aai-ws-timing.lock`. A speed test that takes that lock exclusively then never times code while a build runs. A build waits up to 5 minutes for such a timing to finish, then goes ahead without the lock. Python code takes the same lock with `fastws.cargo.timing_lock`: `with timing_lock(exclusive=True):` around a timing, and `with timing_lock():` around a test run. An exclusive hold that has waited 30 seconds prints the processes that have the lock's file open. It raises `TimeoutError` after 5 minutes. Windows builds and tests run without this timing coordination.
+`cargo develop` keeps each build it installs in `~/.cache/fastws/builds/<project>/<id>/`, read-only. The id hashes the build's inputs, the files that Cargo's dep-info lists for its artifacts, and its files, so an identical build is kept once. Each file is a hard link to a blob named by its contents' sha256, so files that don't change between builds take no more space. The installed extension and binaries are symbolic links through `<project>/installed`, which `cargo develop` points at the new build in one step: a process or a timing that resolved a build never sees it change. `fastws.store.builds(root)` lists the newest builds with the input files that changed in each, and `fastws.store.resolve(root, id)` gives a build's directory from a prefix of its id. Each `cargo develop` deletes the builds that are neither installed, among the project's last 20, nor from the last 2 days. Windows installs copies.
+
+On Unix, every rustc call holds a shared `flock` on `/tmp/aai-ws-timing.lock`, through the rustc wrapper that sync writes (see `ws-sync`). A speed test that takes that lock exclusively then never times code while a build runs. A timing also holds `/tmp/aai-ws-timing.gate` from the start of its wait, and a shared hold passes that file first, so no new rustc call or test run starts while a timing waits. A shared hold waits up to 5 minutes for a timing to finish, then goes ahead without the lock. Python code takes the same lock with `fastws.timelock.timing_lock`: `with timing_lock(exclusive=True):` around a timing, and `with timing_lock():` around a test run. A shared hold inside another shared hold of the same process uses the outer one. An exclusive hold that has waited 30 seconds prints the processes that have the lock's file open. It raises `TimeoutError` after 5 minutes. Windows builds and tests run without this timing coordination.
 
 Use `fastws.build_backend` as the build backend of a mixed project, and include `fastws-cli>=0.0.29` alongside `maturin>=1.13,<2.0` in `[build-system].requires`. Its editable builds install only Python metadata and the source path, and compile no Rust. `ws-sync` then runs `cargo develop` to build and install the extension, the binaries and the wheel data files. After standalone `uv sync`, run `cargo develop` yourself.
 
@@ -217,7 +219,7 @@ cargo wait
 cargo wait --path /path/to/workspace
 ```
 
-Use it when another process's unfinished edits stop the workspace compiling, such as a second agent working in the same tree. Each check runs `cargo check --all-targets` while holding the timing lock shared, as builds do. After a failed check, `cargo wait` prints Cargo's first error line. It checks again once a source file of a local package changes and then stays unchanged for 2 seconds. Local packages are the workspace's members and its path dependencies, such as a sibling crate that `ws-sync` patches in. When a check passes, it prints `compiles` and exits. After `--patience` seconds, 1800 by default, it prints the last check's errors and exits with status 1.
+Use it when another process's unfinished edits stop the workspace compiling, such as a second agent working in the same tree. Each check runs `cargo check --all-targets`, whose rustc calls hold the timing lock shared, as every build's do. After a failed check, `cargo wait` prints Cargo's first error line. It checks again once a source file of a local package changes and then stays unchanged for 2 seconds. Local packages are the workspace's members and its path dependencies, such as a sibling crate that `ws-sync` patches in. When a check passes, it prints `compiles` and exits. After `--patience` seconds, 1800 by default, it prints the last check's errors and exits with status 1.
 
 ### `ws-sync`
 
@@ -238,9 +240,11 @@ Existing globs, entries for missing directories, and entries for checkouts that 
 
 Each sync regenerates Cargo overrides in the workspace's `.cargo/config.toml`. `[patch.crates-io]` gets an entry for each local crate, including nested Cargo workspace members, except a crate marked `publish = false`, which never comes from crates.io. Git dependencies that name local crates get entries under the matching URL. Builds under the workspace root use these local checkouts. Entries pointing outside the root and other configuration sections are preserved.
 
+Sync also defaults `[term] quiet = true` in that file to suppress routine Cargo output and warnings. An explicit `quiet = false` is preserved.
+
 Do not commit a `Cargo.lock` generated under these patches. Its source-less local entries cannot be resolved on another machine.
 
-When `sccache` is installed, sync also configures it as Cargo's `rustc-wrapper`, allowing unchanged compilation units to be reused across the workspace's otherwise-independent Cargo target directories. An existing wrapper is always preserved. If neither a wrapper nor `sccache` is present, sync warns with the install command (`cargo install sccache --locked`) and continues; rerun `ws-sync` after installing to enable it.
+Sync writes `.cargo/rustc-lock` and makes it Cargo's `rustc-wrapper`. The script runs each rustc call holding the timing lock shared (see `cargo develop` above). Inside the lock it runs the wrapper that the config named before sync first wrote the script, where another tool set one, and otherwise `sccache` when it's installed, so unchanged compilation units are reused across the workspace's otherwise-independent Cargo target directories. Later syncs keep that inner wrapper. The script costs about 9 ms a rustc call, mostly the Python interpreter's start. If `sccache` isn't installed, sync warns with the install command (`cargo install sccache --locked`) and continues; rerun `ws-sync` after installing to enable it. On Windows, where the lock does nothing, the config keeps another tool's wrapper, or else names `sccache`.
 
 Fastws discovers JavaScript packages directly under the workspace root. It reads each package's `workspaces` list for declared nested packages. These lists accept paths and globs. Fastws ignores undeclared nested packages. Lockfiles do not affect discovery. `[tool.fastws].exclude` matches paths relative to the workspace root. Fastws skips `node_modules` and directories whose names start with `.` or `_`.
 

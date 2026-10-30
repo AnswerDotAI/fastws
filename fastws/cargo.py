@@ -1,16 +1,13 @@
 r"Build, test and install Cargo artifacts for mixed Rust/Python projects."
-import json, os, re, shutil, subprocess, sys, sysconfig, time
+import json, os, re, shutil, subprocess, sys, sysconfig
 from collections import Counter
-from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path
 from typing import NamedTuple
+from . import store
 
 try: import tomllib
 except ModuleNotFoundError: import tomli as tomllib
-
-# The file whose lock keeps timings and builds apart on this machine. Timings take it exclusively. Builds and test runs take it shared.
-_TIMING_LOCK = '/tmp/aai-ws-timing.lock'
 
 
 class ConfigError(ValueError):
@@ -32,48 +29,9 @@ def members(root):
     return {Path(p['manifest_path']) for p in json.loads(cargo(root, 'metadata', '--no-deps', '--format-version', '1'))['packages']}
 
 
-def _lock_users():
-    "The other processes that have the timing lock's file open, as `pid command` strings from `lsof`. On macOS, where `lsof` doesn't show `flock` holds, the list also includes any process waiting for the lock."
-    users, pid = [], ''
-    for line in subprocess.run(['lsof', '+c', '0', '-F', 'pc', _TIMING_LOCK], capture_output=True, text=True).stdout.splitlines():
-        if line[:1] == 'p': pid = line[1:]
-        elif line[:1] == 'c' and pid != str(os.getpid()): users.append(f'{pid} {line[1:]}')
-    return users
-
-
-@contextmanager
-def timing_lock(
-    exclusive=False, # Take the lock exclusively, as a timing does; False: take it shared, as a build or a test run does
-):
-    "Hold the Unix lock that keeps this machine's timings apart from its builds and test runs; a no-op on Windows. A hold waits up to 5 minutes for the lock. After that, a shared hold goes ahead without it. An exclusive hold raises `TimeoutError`. An exclusive hold that has waited 30 seconds prints, once, the other processes that have the lock's file open."
-    if os.name == 'nt':
-        yield
-        return
-    import fcntl
-    with open(_TIMING_LOCK, 'a') as f:
-        start, waiting, reported = time.monotonic(), False, False
-        while True:
-            try:
-                fcntl.flock(f, (fcntl.LOCK_EX if exclusive else fcntl.LOCK_SH) | fcntl.LOCK_NB)
-                break
-            except BlockingIOError: pass
-            waited = time.monotonic() - start
-            if waited > 300:
-                if exclusive: raise TimeoutError(f'a build or another timing has held {_TIMING_LOCK} for 5 minutes')
-                print(f'going ahead although a timing still holds {_TIMING_LOCK}', file=sys.stderr)
-                break
-            if not waiting: print(f'waiting for {"a build or another timing" if exclusive else "a timing"} to release {_TIMING_LOCK}', file=sys.stderr)
-            waiting = True
-            if exclusive and not reported and waited > 30:
-                print(f'{_TIMING_LOCK} is still taken after 30 seconds. Processes with it open: {", ".join(_lock_users()) or "none"}', file=sys.stderr)
-                reported = True
-            time.sleep(0.25)
-        yield
-
-
 def check(root):
-    "Check every target of the workspace with Cargo, holding the timing lock shared. Cargo's messages are in the result's `stderr`, which `diagnostics` reads."
-    with timing_lock(): return subprocess.run(['cargo', 'check', '--all-targets', '--message-format=short'], cwd=Path(root).expanduser(), stderr=subprocess.PIPE, text=True)
+    "Check every target of the workspace with Cargo. Cargo's messages are in the result's `stderr`, which `diagnostics` reads."
+    return subprocess.run(['cargo', 'check', '--all-targets', '--message-format=short'], cwd=Path(root).expanduser(), stderr=subprocess.PIPE, text=True)
 
 
 # Cargo's line that starts a test binary: `Running` with its target and executable, or `Doc-tests` with its package.
@@ -174,7 +132,7 @@ def run_tests(
     env:dict=None, # Environment variables to set for the run, such as `{'BASEDPL_COSTS': '1'}`
     timeout:float=None # Seconds before the run stops, raising `subprocess.TimeoutExpired`
 )->Results:
-    "Run `cargo test` in `root` and read what it prints. Compiler messages come in Cargo's short format. It doesn't hold the timing lock as `check` and `build` do: tests that time take the lock exclusively themselves, and a shared hold here would block them."
+    "Run `cargo test` in `root` and read what it prints. Compiler messages come in Cargo's short format. It holds no timing lock itself: each rustc call holds it shared through the rustc wrapper that `ws-sync` writes, and tests that time take it exclusively."
     # A quiet Cargo config hides the `Running` lines that divide the binaries' output.
     p = subprocess.run(['cargo', 'test', '--message-format=short', *args], cwd=Path(root).expanduser(), stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, timeout=timeout,
                        env=os.environ | {'CARGO_TERM_QUIET': 'false', 'CARGO_TERM_COLOR': 'never'} | (env or {}))
@@ -236,7 +194,7 @@ def build(
     for flag, active in [('all-features', all_features), ('no-default-features', no_default_features)]:
         if active or cfg.get(flag): cmd.append('--' + flag)
     extra, env = _maturin_flags(target, os.environ) if for_maturin else ([], None)
-    with timing_lock(): result = subprocess.run(['cargo', *cmd, *extra], cwd=root, stdout=subprocess.PIPE, text=True, env=env)
+    result = subprocess.run(['cargo', *cmd, *extra], cwd=root, stdout=subprocess.PIPE, text=True, env=env)
     messages = [json.loads(line) for line in result.stdout.splitlines()]
     for m in messages:
         if m.get('reason') != 'compiler-message': continue
@@ -257,7 +215,7 @@ def replace(source, destination):
 
 
 def develop(root):
-    "Install a Python extension, opted-in binaries and wheel data, running the project's post-develop module before wheel data."
+    "Build a project's Python extension and opted-in binaries, keep them with its Python package as one build (`store.keep`), and install that build (`store.install`). Then run the project's post-develop module and install its wheel data."
     root = Path(root).expanduser()
     tool = settings(root)
     cfg = tool['maturin']
@@ -265,15 +223,20 @@ def develop(root):
     binaries = tool.get('fastws', {}).get('native-binaries', False)
     artifacts = build(root, binaries=binaries, profile='test')
     artifact, = [m for m in artifacts if 'cdylib' in m['target']['crate_types']]
-    lib, = [f for f in artifact['filenames'] if Path(f).suffix in ('.dylib', '.so', '.dll')]
+    lib, = [Path(f) for f in artifact['filenames'] if Path(f).suffix in ('.dylib', '.so', '.dll')]
     module = cfg.get('module-name', artifact['target']['name'])
-    dest = root/cfg['python-source']/Path(*module.split('.'))
-    replace(lib, dest.with_name(dest.name + sysconfig.get_config_var('EXT_SUFFIX')))
+    src = root/cfg['python-source']
+    ext = src/Path(*module.split('.'))
+    ext = ext.with_name(ext.name + sysconfig.get_config_var('EXT_SUFFIX'))
     env = Path(os.environ.get('VIRTUAL_ENV', sys.prefix))
-    if binaries:
-        scripts = env/('Scripts' if os.name == 'nt' else 'bin')
-        for m in artifacts:
-            if m.get('executable'): replace(m['executable'], scripts/Path(m['executable']).name)
+    scripts = env/('Scripts' if os.name == 'nt' else 'bin')
+    exes = [Path(m['executable']) for m in artifacts if binaries and m.get('executable')]
+    package = src/module.split('.')[0]
+    files = {f'python/{f.relative_to(src)}': f for f in package.rglob('*') if f.is_file() and f != ext and '__pycache__' not in f.parts}
+    files |= {f'python/{ext.relative_to(src)}': lib} | {f'bin/{e.name}': e for e in exes}
+    kept = store.keep(root, files, dict.fromkeys(f for a in [lib, *exes] for f in store.dep_files(a)))
+    store.install(root, kept, {ext: f'python/{ext.relative_to(src)}'} | {scripts/e.name: f'bin/{e.name}' for e in exes})
+    store.collect()
     if generator := tool.get('fastws', {}).get('post-develop-module'):
         subprocess.run([sys.executable, '-m', generator], cwd=root, check=True)
     # Editable builds through `build_backend` don't install the wheel's data files, which a wheel install puts under the prefix.

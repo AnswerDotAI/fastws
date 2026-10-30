@@ -60,3 +60,6 @@ version = { attr = "fastws.__version__" }
 
 [tool.setuptools.packages.find]
 include = ["fastws"]
+
+[tool.pytest.ini_options]
+asyncio_default_fixture_loop_scope = "function"
