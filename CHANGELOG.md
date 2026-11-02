@@ -1,5 +1,13 @@
 <!-- do not remove -->
 
+## 0.0.33
+
+### New Features
+
+- Run native Rust tests directly with shared timeout, serialize cargo develop with store locks, and make timing locks fail instead of proceed ([#54](https://github.com/AnswerDotAI/fastws/issues/54))
+- Keep cargo develop builds in content-addressed store with atomic installs; hold timing lock per rustc call via ws-sync wrapper ([#53](https://github.com/AnswerDotAI/fastws/issues/53))
+
+
 ## 0.0.32
 
 ### New Features
