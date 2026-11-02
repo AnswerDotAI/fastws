@@ -193,9 +193,13 @@ Set `native-binaries = true` under `[tool.fastws]` to build and install the bina
 
 Set `post-develop-module = "package.generator"` under `[tool.fastws]` to run a generator after installing the native extension and binaries, before copying wheel data. It runs with the current Python in a fresh process from the project root, including when Cargo reuses its build. A failure stops `cargo develop` or `ws-sync`. Use it for generated files that need the rebuilt extension's metadata.
 
-`cargo develop` keeps each build it installs in `~/.cache/fastws/builds/<project>/<id>/`, read-only. The id hashes the build's inputs, the files that Cargo's dep-info lists for its artifacts, and its files, so an identical build is kept once. Each file is a hard link to a blob named by its contents' sha256, so files that don't change between builds take no more space. The installed extension and binaries are symbolic links through `<project>/installed`, which `cargo develop` points at the new build in one step: a process or a timing that resolved a build never sees it change. `fastws.store.builds(root)` lists the newest builds with the input files that changed in each, and `fastws.store.resolve(root, id)` gives a build's directory from a prefix of its id. Each `cargo develop` deletes the builds that are neither installed, among the project's last 20, nor from the last 2 days. Windows installs copies.
+`cargo develop` keeps each build it installs in `~/.cache/fastws/builds/<project>/<id>/`, read-only. Files are copied first, then hashed, and hard-linked to blobs named by those captured bytes' sha256. The build id hashes these artifacts and the current digests of inputs listed by Cargo's dep-info. Input digests are observations at capture time, not proof of what the compiler read. The record's `started` gives the build's start time; `edited` flags inputs **possibly modified since build started**, by mtime, including inputs of a first build or newly discovered dependencies. Identical inputs and artifacts reuse their first capture's record.
 
-On Unix, every rustc call holds a shared `flock` on `/tmp/aai-ws-timing.lock`, through the rustc wrapper that sync writes (see `ws-sync`). A speed test that takes that lock exclusively then never times code while a build runs. A timing also holds `/tmp/aai-ws-timing.gate` from the start of its wait, and a shared hold passes that file first, so no new rustc call or test run starts while a timing waits. A shared hold waits up to 5 minutes for a timing to finish, then goes ahead without the lock. Python code takes the same lock with `fastws.timelock.timing_lock`: `with timing_lock(exclusive=True):` around a timing, and `with timing_lock():` around a test run. A shared hold inside another shared hold of the same process uses the outer one. An exclusive hold that has waited 30 seconds prints the processes that have the lock's file open. It raises `TimeoutError` after 5 minutes. Windows builds and tests run without this timing coordination.
+The installed extension and binaries are symbolic links through `<project>/installed`, which `cargo develop` points at the new build in one step. `fastws.store.builds(root)` gives the newest build records, with input changes since the preceding build, and `fastws.store.resolve(root, id)` resolves a build-id prefix. Each develop deletes builds that are neither installed, among the project's last 20, nor from the last 2 days, then old unlinked blobs.
+
+On Unix, cooperating `cargo develop` runs take a per-project lock through compilation, capture, installation, the post-develop generator and wheel data. Store readers and capture/install operations hold shared store access; collection takes it exclusively. Ordinary Cargo commands do not take the project lock: agents must not run competing raw Cargo builds against that project during develop. Windows installs copies and does not take these locks.
+
+On Unix, every rustc call holds a shared `flock` on `/tmp/aai-ws-timing.lock`, through the rustc wrapper that sync writes (see `ws-sync`). A speed test that takes that lock exclusively stays apart from participating builds and test runs. A timing also holds `/tmp/aai-ws-timing.gate` while it waits for the lock and holds it, and a shared hold passes that file first, so new rustc calls and test runs wait behind the timing. Both shared and exclusive acquisition fail after 5 minutes; work never proceeds unlocked. Python code takes the same lock with `fastws.timelock.timing_lock`: `with timing_lock(exclusive=True):` around a timing, and `with timing_lock():` around a test run. Shared-inside-shared in one thread reuses its hold; each thread otherwise takes its own hold. Any nesting involving exclusive raises `RuntimeError` immediately. An exclusive hold that has waited 30 seconds prints the processes that have the lock's file open. Windows builds and tests run without this timing coordination.
 
 Use `fastws.build_backend` as the build backend of a mixed project, and include `fastws-cli>=0.0.29` alongside `maturin>=1.13,<2.0` in `[build-system].requires`. Its editable builds install only Python metadata and the source path, and compile no Rust. `ws-sync` then runs `cargo develop` to build and install the extension, the binaries and the wheel data files. After standalone `uv sync`, run `cargo develop` yourself.
 
@@ -220,6 +224,21 @@ cargo wait --path /path/to/workspace
 ```
 
 Use it when another process's unfinished edits stop the workspace compiling, such as a second agent working in the same tree. Each check runs `cargo check --all-targets`, whose rustc calls hold the timing lock shared, as every build's do. After a failed check, `cargo wait` prints Cargo's first error line. It checks again once a source file of a local package changes and then stays unchanged for 2 seconds. Local packages are the workspace's members and its path dependencies, such as a sibling crate that `ws-sync` patches in. When a check passes, it prints `compiles` and exits. After `--patience` seconds, 1800 by default, it prints the last check's errors and exits with status 1.
+
+### Rust tests from Python
+
+`fastws.cargo.run_tests` builds native tests once with Cargo, without a time limit, then runs the executables that Cargo reports directly from their package directories. Its `timeout` defaults to 30 seconds shared across the test binaries, excluding compilation. Source edits between building and running do not trigger another build: the results describe the compiled build, not necessarily the latest working tree. It supports directly runnable native tests, not cross-target runners.
+
+Pass Cargo build/selection options positionally, and test filters and harness options in `test_args`. A failed binary stops the run unless `--no-fail-fast` is given. Results contain compiler diagnostics and each binary's outcomes and captured failures.
+
+```python
+from fastws.cargo import run_tests
+
+native = run_tests('.', '--no-fail-fast')
+focused = run_tests('.', '--test', 'core', test_args=('test_name', '--nocapture'))
+```
+
+Doctests are deliberately not run; keep executable examples in ordinary Rust tests. `run_tests` accepts `env` overrides and `timeout=None` to disable its watchdog. It takes no timing lock around the run: rustc's wrapper owns its shared holds, and tests that time own their exclusive holds.
 
 ### `ws-sync`
 

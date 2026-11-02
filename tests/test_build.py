@@ -48,14 +48,14 @@ def test_run_tests(tmp_path):
     (tmp_path/'Cargo.toml').write_text('[package]\nname = "app"\nversion = "0.1.0"\nedition = "2021"\n')
     (tmp_path/'src').mkdir()
     (tmp_path/'src/lib.rs').write_text('''pub fn unused() { let x = 1; }
-/// ```
-/// assert_eq!(app::two(), 2);
-/// ```
 pub fn two() -> i32 { 2 }
 #[cfg(test)] mod t {
     #[test] fn passes() {}
     #[test] fn fails() { panic!("broken"); }
-    #[test] #[ignore] fn skipped() {}
+    #[test] #[ignore] fn skipped() {
+        println!("started slow test");
+        std::thread::sleep(std::time::Duration::from_secs(60));
+    }
 }
 ''')
     (tmp_path/'tests').mkdir()
@@ -65,9 +65,11 @@ pub fn two() -> i32 { 2 }
     r = run_tests(tmp_path, '--no-fail-fast')
     assert not r.ok
     assert [(d.path, d.line, d.level) for d in r.diagnostics] == [('src/lib.rs', 1, 'warning')]
-    unit, more, docs = r.suites
-    assert [s.name for s in r.suites] == ['unittests src/lib.rs', 'tests/more.rs', 'Doc-tests app']
+    suites = {s.name: s for s in r.suites}
+    unit, more = suites['unittests src/lib.rs'], suites['tests/more.rs']
+    assert len(suites) == 2
     assert unit.tests == {'t::passes': 'ok', 't::fails': 'FAILED', 't::skipped': 'ignored'} and unit.failed
     assert 'broken' in unit.failures['t::fails'] and list(unit.failures) == ['t::fails']
     assert more.tests == {'other': 'ok'} and not more.failed
-    assert list(docs.tests.values()) == ['ok']
+    with pytest.raises(TimeoutError, match='started slow test'):
+        run_tests(tmp_path, '--lib', test_args=('skipped', '--ignored', '--nocapture'), timeout=.5)

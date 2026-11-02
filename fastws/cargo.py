@@ -1,10 +1,11 @@
 r"Build, test and install Cargo artifacts for mixed Rust/Python projects."
-import json, os, re, shutil, subprocess, sys, sysconfig
+import json, os, re, shutil, subprocess, sys, sysconfig, time
 from collections import Counter
 from dataclasses import dataclass
 from pathlib import Path
 from typing import NamedTuple
 from . import store
+from .procs import bounded
 
 try: import tomllib
 except ModuleNotFoundError: import tomli as tomllib
@@ -34,8 +35,6 @@ def check(root):
     return subprocess.run(['cargo', 'check', '--all-targets', '--message-format=short'], cwd=Path(root).expanduser(), stderr=subprocess.PIPE, text=True)
 
 
-# Cargo's line that starts a test binary: `Running` with its target and executable, or `Doc-tests` with its package.
-_SUITE = re.compile(r'^\s+(?:Running (.+) \([^)]*\)|(Doc-tests .+))$')
 _TEST = re.compile(r'^test (.+) \.\.\. (ok|FAILED|ignored)')
 _FAILURE = re.compile(r'^---- (.+) std(?:out|err) ----$')
 _DIAGNOSTIC = re.compile(r'^(\S.*?):(\d+):(\d+): (warning|error)(?:\[\w+\])?: (.*)$')
@@ -63,17 +62,17 @@ def _lines(text, n=20, tail=False):
 
 @dataclass
 class Suite:
-    "What one test binary printed when `cargo test` ran it."
-    name:str # Cargo's name for the binary, such as `tests/core.rs`, `unittests src/lib.rs` or `Doc-tests basedpl`
-    output:str # Everything printed after Cargo's line that starts the binary, until the next binary starts
+    "What one native test binary printed."
+    name:str # The target source, such as `tests/core.rs` or `unittests src/lib.rs`
+    output:str # Everything the binary printed, standard output and standard error merged
     tests:dict # Each test's outcome: `ok`, `FAILED` or `ignored`
     failures:dict # Each failing test's captured output
     summary:str # libtest's `test result:` line, empty for a binary that crashed or has its own harness
-    failed:bool # Did Cargo report the binary as failing?
+    failed:bool # Did the binary exit unsuccessfully?
 
     @classmethod
-    def read(cls, name, lines):
-        "Read one binary's lines."
+    def read(cls, name, lines, returncode):
+        "Read one binary's lines and exit status."
         failures, current = {}, None
         for line in lines:
             if m := _FAILURE.match(line): current = failures.setdefault(m[1], [])
@@ -81,7 +80,7 @@ class Suite:
             elif current is not None: current.append(line)
         return cls(name, '\n'.join(lines), {m[1]: m[2] for l in lines if (m := _TEST.match(l))},
                    {k: '\n'.join(v).strip('\n') for k,v in failures.items()},
-                   next((l for l in lines if l.startswith('test result: ')), ''), any(l.startswith('error: test failed') for l in lines))
+                   next((l for l in lines if l.startswith('test result: ')), ''), bool(returncode))
 
     def __str__(self):
         n = Counter(self.tests.values())
@@ -93,11 +92,12 @@ class Suite:
 
 @dataclass
 class Results:
-    "What `cargo test` printed, read into the build's compiler messages and each test binary's results. It displays as a summary: the compiler messages, each binary that ran tests, and each failure's output."
+    "A build's compiler messages and each native test binary's results. It displays as a summary: the compiler messages, each binary that ran tests, and each failure's output."
     returncode:int
-    text:str # Everything Cargo and the tests printed, standard output and standard error in the order they were written
+    text:str # The build's messages and each binary's merged standard output and standard error
     diagnostics:list # Each `Diagnostic` from the build, before the first binary ran
-    suites:list # Each binary's `Suite`, in the order Cargo ran them
+    suites:list # Each binary's `Suite`, in execution order
+    seconds:float=0 # Wall time spent executing native test binaries, excluding compilation
 
     @property
     def ok(self): return self.returncode == 0
@@ -117,27 +117,38 @@ class Results:
         return '\n'.join(res)
 
 
-def _blocks(text):
-    "Split `text` at Cargo's lines that start a test binary, into `(name, lines)` pairs. The first pair, named `None`, holds the build's lines."
-    res = [(None, [])]
-    for line in text.splitlines():
-        if m := _SUITE.match(line): res.append((m[1] or m[2], []))
-        else: res[-1][1].append(line)
-    return res
-
-
 def run_tests(
     root, # A Cargo package or workspace (expands `~`)
-    *args, # Arguments for `cargo test`, such as `'--test', 'core'`, a test name to filter by, or `'--', '--nocapture'`
+    *args, # Cargo build/selection options, such as `'--test', 'core'` or `'--profile', 'checked'`; `--no-fail-fast` runs every binary
+    test_args=(), # Arguments passed directly to each test binary, such as `('name', '--nocapture')`
     env:dict=None, # Environment variables to set for the run, such as `{'BASEDPL_COSTS': '1'}`
-    timeout:float=None # Seconds before the run stops, raising `subprocess.TimeoutExpired`
+    timeout:float=30 # Seconds shared by all native test binaries after building, raising `TimeoutError` on expiry; None: no limit
 )->Results:
-    "Run `cargo test` in `root` and read what it prints. Compiler messages come in Cargo's short format. It holds no timing lock itself: each rustc call holds it shared through the rustc wrapper that `ws-sync` writes, and tests that time take it exclusively."
-    # A quiet Cargo config hides the `Running` lines that divide the binaries' output.
-    p = subprocess.run(['cargo', 'test', '--message-format=short', *args], cwd=Path(root).expanduser(), stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, timeout=timeout,
-                       env=os.environ | {'CARGO_TERM_QUIET': 'false', 'CARGO_TERM_COLOR': 'never'} | (env or {}))
-    (_, build), *runs = _blocks(p.stdout)
-    return Results(p.returncode, p.stdout, diagnostics('\n'.join(build)), [Suite.read(*b) for b in runs])
+    "Build native tests once, with no time limit, then run Cargo's reported executables directly from their package directories. Source edits after building cannot trigger another build; results describe the compiled build, not the latest working tree. `timeout` covers the binaries together, excluding compilation. Doctests are not run. This takes no timing lock: rustc's wrapper and tests that time own their holds."
+    root, env = Path(root).expanduser().resolve(), os.environ | {'CARGO_TERM_QUIET': 'false', 'CARGO_TERM_COLOR': 'never'} | (env or {})
+    built = bounded(['cargo', 'test', '--no-run', '--message-format=json-diagnostic-short', *args], seconds=None, merge=True, cwd=root, env=env)
+    text, artifacts = [], []
+    for line in built.stdout.splitlines(keepends=True):
+        if not line.startswith('{'): text.append(line); continue
+        m = json.loads(line)
+        if m['reason'] == 'compiler-message': text.append(m['message']['rendered'])
+        elif m['reason'] == 'compiler-artifact' and m['profile']['test'] and m.get('executable'): artifacts.append(m)
+    text = ''.join(text)
+    found = list(dict.fromkeys(diagnostics(text)))
+    if built.returncode: return Results(built.returncode, text, found, [])
+    suites, code, start = [], 0, time.monotonic()
+    for m in artifacts:
+        package = Path(m['manifest_path']).parent
+        name = Path(m['target']['src_path']).relative_to(package).as_posix()
+        if 'test' not in m['target']['kind']: name = 'unittests ' + name
+        left = None if timeout is None else max(0, timeout - (time.monotonic() - start))
+        p = bounded([m['executable'], *test_args], left, merge=True, cwd=package, env=env | {'CARGO_MANIFEST_DIR': str(package)})
+        suites.append(Suite.read(name, p.stdout.splitlines(), p.returncode))
+        text += f'     Running {name} ({m["executable"]})\n' + p.stdout
+        if p.returncode:
+            code = p.returncode
+            if '--no-fail-fast' not in args: break
+    return Results(code, text, found, suites, time.monotonic() - start)
 
 
 def sources(root):
@@ -215,35 +226,37 @@ def replace(source, destination):
 
 
 def develop(root):
-    "Build a project's Python extension and opted-in binaries, keep them with its Python package as one build (`store.keep`), and install that build (`store.install`). Then run the project's post-develop module and install its wheel data."
+    "Serialize this project's cooperating develop runs through build, artifact capture, installation, generator and wheel data. Raw Cargo commands do not take this lock."
     root = Path(root).expanduser()
-    tool = settings(root)
-    cfg = tool['maturin']
-    if 'python-source' not in cfg: raise ConfigError(r'cargo develop requires tool.maturin.python-source')
-    binaries = tool.get('fastws', {}).get('native-binaries', False)
-    artifacts = build(root, binaries=binaries, profile='test')
-    artifact, = [m for m in artifacts if 'cdylib' in m['target']['crate_types']]
-    lib, = [Path(f) for f in artifact['filenames'] if Path(f).suffix in ('.dylib', '.so', '.dll')]
-    module = cfg.get('module-name', artifact['target']['name'])
-    src = root/cfg['python-source']
-    ext = src/Path(*module.split('.'))
-    ext = ext.with_name(ext.name + sysconfig.get_config_var('EXT_SUFFIX'))
-    env = Path(os.environ.get('VIRTUAL_ENV', sys.prefix))
-    scripts = env/('Scripts' if os.name == 'nt' else 'bin')
-    exes = [Path(m['executable']) for m in artifacts if binaries and m.get('executable')]
-    package = src/module.split('.')[0]
-    files = {f'python/{f.relative_to(src)}': f for f in package.rglob('*') if f.is_file() and f != ext and '__pycache__' not in f.parts}
-    files |= {f'python/{ext.relative_to(src)}': lib} | {f'bin/{e.name}': e for e in exes}
-    kept = store.keep(root, files, dict.fromkeys(f for a in [lib, *exes] for f in store.dep_files(a)))
-    store.install(root, kept, {ext: f'python/{ext.relative_to(src)}'} | {scripts/e.name: f'bin/{e.name}' for e in exes})
-    store.collect()
-    if generator := tool.get('fastws', {}).get('post-develop-module'):
-        subprocess.run([sys.executable, '-m', generator], cwd=root, check=True)
-    # Editable builds through `build_backend` don't install the wheel's data files, which a wheel install puts under the prefix.
-    if 'data' in cfg:
-        data = root/cfg['data']/'data'
-        for f in data.rglob('*'):
-            if f.is_file(): replace(f, env/f.relative_to(data))
+    with store.building(root) as started:
+        tool = settings(root)
+        cfg = tool['maturin']
+        if 'python-source' not in cfg: raise ConfigError(r'cargo develop requires tool.maturin.python-source')
+        binaries = tool.get('fastws', {}).get('native-binaries', False)
+        artifacts = build(root, binaries=binaries, profile='test')
+        artifact, = [m for m in artifacts if 'cdylib' in m['target']['crate_types']]
+        lib, = [Path(f) for f in artifact['filenames'] if Path(f).suffix in ('.dylib', '.so', '.dll')]
+        module = cfg.get('module-name', artifact['target']['name'])
+        src = root/cfg['python-source']
+        ext = src/Path(*module.split('.'))
+        ext = ext.with_name(ext.name + sysconfig.get_config_var('EXT_SUFFIX'))
+        env = Path(os.environ.get('VIRTUAL_ENV', sys.prefix))
+        scripts = env/('Scripts' if os.name == 'nt' else 'bin')
+        exes = [Path(m['executable']) for m in artifacts if binaries and m.get('executable')]
+        package = src/module.split('.')[0]
+        files = {f'python/{f.relative_to(src)}': f for f in package.rglob('*') if f.is_file() and f != ext and '__pycache__' not in f.parts}
+        files |= {f'python/{ext.relative_to(src)}': lib} | {f'bin/{e.name}': e for e in exes}
+        with store.access():
+            kept = store.keep(root, files, dict.fromkeys(f for a in [lib, *exes] for f in store.dep_files(a)), started)
+            store.install(root, kept, {ext: f'python/{ext.relative_to(src)}'} | {scripts/e.name: f'bin/{e.name}' for e in exes})
+        store.collect()
+        if generator := tool.get('fastws', {}).get('post-develop-module'):
+            subprocess.run([sys.executable, '-m', generator], cwd=root, check=True)
+        # Editable builds through `build_backend` don't install the wheel's data files, which a wheel install puts under the prefix.
+        if 'data' in cfg:
+            data = root/cfg['data']/'data'
+            for f in data.rglob('*'):
+                if f.is_file(): replace(f, env/f.relative_to(data))
 
 
 def stage_binaries(root, profile=None, target=None, features=None, all_features=False, no_default_features=False):
