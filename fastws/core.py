@@ -14,8 +14,7 @@ from ghapi.core import dep_key, dep_closure
 from packaging.requirements import Requirement
 from packaging.utils import canonicalize_name
 
-try: import tomllib
-except ModuleNotFoundError: import tomli as tomllib
+from ._toml import tomllib
 
 def _repo_lines(repos_file) -> list[str]:
     p = Path(repos_file)

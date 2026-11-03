@@ -1,12 +1,13 @@
 r"""Builds that `cargo develop` installs, each kept once, read-only, and named by the hash of its inputs and files. A project's installed build is a pointer to one of them, which installing replaces in one step, so a process or a timing that resolves a build never sees it change.
 
 A build is a directory under `STORE/<project>/`, named by its id, that holds `build.json` and a hard link to a blob for each file: `python/…` for the Python package with its extension, `bin/…` for binaries and `data/…` for wheel data. Each blob, under `STORE/blobs/`, is named by its contents' sha256, so files that don't change between builds take no more space. Installed paths are symbolic links through `STORE/<project>/installed`, a link to the installed build's directory. Windows installs copies."""
-import hashlib, json, os, re, shutil, time, tomllib
+import hashlib, json, os, re, shutil, time
 if os.name != 'nt': import fcntl
 from contextlib import contextmanager
 from datetime import datetime
 from pathlib import Path
 from tempfile import TemporaryDirectory
+from ._toml import tomllib
 
 STORE = Path(os.environ.get('XDG_CACHE_HOME') or '~/.cache').expanduser()/'fastws'/'builds' # Each project's builds, and the blobs that their files link to
 KEEP, KEEP_DAYS = 20, 2 # `collect` keeps each project's installed build, its last `KEEP` builds and its builds of the last `KEEP_DAYS` days
@@ -32,7 +33,10 @@ def access(exclusive=False):
         yield
 
 def _digest(path):
-    with open(path, 'rb') as f: return hashlib.file_digest(f, 'sha256').hexdigest()
+    digest = hashlib.sha256()
+    with open(path, 'rb') as f:
+        while chunk := f.read(1024*1024): digest.update(chunk)
+    return digest.hexdigest()
 
 def _blob(path):
     "The blob that holds `path`'s contents, read-only and executable where `path` is, added to the store where it's new."

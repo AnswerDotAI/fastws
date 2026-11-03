@@ -6,9 +6,7 @@ from pathlib import Path
 from typing import NamedTuple
 from . import store
 from .procs import bounded
-
-try: import tomllib
-except ModuleNotFoundError: import tomli as tomllib
+from ._toml import tomllib
 
 
 class ConfigError(ValueError):
