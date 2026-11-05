@@ -1,6 +1,6 @@
 "Fast workspace tools for multi-repo management."
 
-__all__ = ["ws_setup", "ws_clone", "ws_pull", "ws_status", "ws_branches", "ws_build", "ws_sync", "ws_add", "ws_remove", "cargo_develop", "cargo_stage", "cargo_wait"]
+__all__ = ["ws_setup", "ws_clone", "ws_pull", "ws_status", "ws_branches", "ws_build", "ws_sync", "ws_add", "ws_remove", "cargo_setup", "cargo_develop", "cargo_stage", "cargo_wait"]
 
 import ast, fnmatch, glob, hashlib, json, os, re, shlex, shutil, subprocess, sys, time
 from pathlib import Path
@@ -724,6 +724,12 @@ def _entry_changes(current, new):
     "Added and removed keys, in the order supplied."
     return [k for k in new if k not in current], [k for k in current if k not in new]
 
+def cargo_setup(root):
+    "Regenerate local Cargo patches and the compile-lock wrapper without pulling or building."
+    root = Path(root).expanduser().resolve()
+    _sync_cargo_wrapper(root)
+    return _sync_cargo_patches(root)
+
 def _sync_cargo_patches(root: Path) -> tuple[list[str], list[str]]:
     """Regenerate workspace Cargo patches, default to quiet output, and return (added, removed).
 
@@ -990,8 +996,7 @@ async def ws_sync(
         projects = _build_projects(root, repos_file)
         _sync_build_isolation(pyproject_path, projects)
     
-        _sync_cargo_wrapper(root)
-        added_p, removed_p = _sync_cargo_patches(root)
+        added_p, removed_p = cargo_setup(root)
         if added_p: print(f"Cargo patches added: {', '.join(added_p)}")
         if removed_p: print(f"Cargo patches removed: {', '.join(removed_p)}")
     
