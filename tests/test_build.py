@@ -1,5 +1,5 @@
 import subprocess, pytest, fastws.core as core
-from fastws.cargo import build, run_tests, diagnostics
+from fastws.cargo import build, check, run_tests
 
 
 def _mk_proj(root, name, extra=''):
@@ -41,7 +41,9 @@ def test_build_diagnostics(tmp_path, capfd, body, diagnostic):
     else: assert [m['target']['name'] for m in build(tmp_path)] == ['app']
     stderr = capfd.readouterr().err
     if diagnostic: assert f'[dep] dep/src/lib.rs:1:' in stderr and f': {diagnostic}:' in stderr
-    else: assert not diagnostics(stderr)
+    else: assert 'lib.rs:' not in stderr
+    checked = check(tmp_path)
+    assert checked.ok == (diagnostic != 'error') and [(d.path, d.level) for d in checked.diagnostics] == ([('dep/src/lib.rs', diagnostic)] if diagnostic else [])
 
 
 def test_run_tests(tmp_path):
@@ -64,12 +66,20 @@ pub fn two() -> i32 { 2 }
     (tmp_path/'.cargo/config.toml').write_text('[term]\nquiet = true\n')
     r = run_tests(tmp_path, '--no-fail-fast')
     assert not r.ok
-    assert [(d.path, d.line, d.level) for d in r.diagnostics] == [('src/lib.rs', 1, 'warning')]
+    assert [(d.path, d.line, d.level, d.code) for d in r.diagnostics] == [('src/lib.rs', 1, 'warning', 'unused_variables')]
     suites = {s.name: s for s in r.suites}
     unit, more = suites['unittests src/lib.rs'], suites['tests/more.rs']
     assert len(suites) == 2
     assert unit.tests == {'t::passes': 'ok', 't::fails': 'FAILED', 't::skipped': 'ignored'} and unit.failed
     assert 'broken' in unit.failures['t::fails'] and list(unit.failures) == ['t::fails']
     assert more.tests == {'other': 'ok'} and not more.failed
-    with pytest.raises(TimeoutError, match='started slow test'):
-        run_tests(tmp_path, '--lib', test_args=('skipped', '--ignored', '--nocapture'), timeout=.5)
+    slow = run_tests(tmp_path, '--lib', test_args=('skipped', '--ignored', '--nocapture'), timeout=.5)
+    s, = slow.suites
+    assert not slow.ok and s.failed and s.timed_out and 'started slow test' in s.output
+    assert str(s) == 'unittests src/lib.rs: ran out of time'
+
+    (tmp_path/'pyproject.toml').write_text(r'tool.fastws.dev-profile = "missing"')
+    r = run_tests(tmp_path, '--test', 'more')
+    assert not r.ok and not r.suites and 'missing' in r.text
+    for args in [('--profile', 'test'), ('--profile=test',), ('--release',), ('-r',)]:
+        assert run_tests(tmp_path, '--test', 'more', *args).ok

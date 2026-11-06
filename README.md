@@ -177,9 +177,10 @@ Build a mixed Rust/Python project's extension and opted-in binaries, keep them w
 ```bash
 cargo develop
 cargo develop --path /path/to/project
+cargo develop --profile quick
 ```
 
-Run from the project root, or give its directory with `--path`. The command reads `python-source`, `module-name`, `manifest-path` and features from `[tool.maturin]`. It always builds with Cargo's `test` profile, matching bare `cargo test`. The project must produce a `cdylib` and set `python-source`. To use release settings without command-line flags, add `[profile.test]` with `inherits = "release"` to `Cargo.toml`. Keep incremental compilation enabled for the local crate in that profile.
+Run from the project root, or give its directory with `--path`. The command reads `python-source`, `module-name`, `manifest-path` and features from `[tool.maturin]`. `[tool.fastws] dev-profile = "quick"` selects a project's default for both `cargo develop` and `fastws.cargo.run_tests`. Without that setting they use `test`. An explicit `--profile NAME` overrides the project default. The project must produce a `cdylib` and set `python-source`. Define the selected profile in `Cargo.toml` and keep incremental compilation enabled for the local crate.
 
 Make the initial editable installation through `ws-sync` or maturin. Repeat that installation when package metadata or entry points change. Running Python processes keep the extension they loaded.
 
@@ -225,11 +226,11 @@ cargo wait --path /path/to/workspace
 
 Use it when another process's unfinished edits stop the workspace compiling, such as a second agent working in the same tree. Each check runs `cargo check --all-targets`, whose rustc calls hold the timing lock shared, as every build's do. After a failed check, `cargo wait` prints Cargo's first error line. It checks again once a source file of a local package changes and then stays unchanged for 2 seconds. Local packages are the workspace's members and its path dependencies, such as a sibling crate that `ws-sync` patches in. When a check passes, it prints `compiles` and exits. After `--patience` seconds, 1800 by default, it prints the last check's errors and exits with status 1.
 
-### Rust tests from Python
+### Rust builds and tests from Python
 
-`fastws.cargo.run_tests` builds native tests once with Cargo, without a time limit, then runs the executables that Cargo reports directly from their package directories. Its `timeout` defaults to 30 seconds shared across the test binaries, excluding compilation. Source edits between building and running do not trigger another build: the results describe the compiled build, not necessarily the latest working tree. It supports directly runnable native tests, not cross-target runners.
+`fastws.cargo.run_tests` builds native tests once with Cargo, without a time limit, then runs the executables that Cargo reports directly from their package directories. Each binary gets its own `timeout`, 30 seconds by default, excluding compilation. A binary still running when its `timeout` ends is killed and counts as a failed binary, with its suite's `timed_out` set. Source edits between building and running do not trigger another build: the results describe the compiled build, not necessarily the latest working tree. It supports directly runnable native tests, not cross-target runners.
 
-Pass Cargo build/selection options positionally, and test filters and harness options in `test_args`. A failed binary stops the run unless `--no-fail-fast` is given. Results contain compiler diagnostics and each binary's outcomes and captured failures.
+The default profile is `[tool.fastws].dev-profile`, or `test` when unset. Explicit `--profile NAME`, `--profile=NAME`, `--release` and `-r` override it. Pass Cargo build/selection options positionally, and test filters and harness options in `test_args`. A failed binary stops the run unless `--no-fail-fast` is given. Results contain compiler diagnostics and each binary's outcomes and captured failures.
 
 ```python
 from fastws.cargo import run_tests
@@ -240,6 +241,34 @@ focused = run_tests('.', '--test', 'core', test_args=('test_name', '--nocapture'
 
 Doctests are deliberately not run; keep executable examples in ordinary Rust tests. `run_tests` accepts `env` overrides and `timeout=None` to disable its watchdog. It takes no timing lock around the run: rustc's wrapper owns its shared holds, and tests that time own their exclusive holds.
 
+`fastws.cargo.check` runs any Cargo subcommand, `check --all-targets` by default, and returns the same `Results` without test suites. A failing run is a result, not an exception. Each `Diagnostic` in its `diagnostics` holds the message's path, line, column, level and text, and its error code or lint as `code`, such as `E0308` or `clippy::too_many_lines`. The summary lists errors first. `env` sets environment variables for the run, as for `run_tests`. A subcommand that rejects `--message-format`, such as `cargo llvm-lines`, runs with `diagnostics=False`: its result holds the exit status and output, with no diagnostics.
+
+```python
+from fastws.cargo import check
+
+lints = check('.', 'clippy', '--all-targets', '--', '-W', 'clippy::too_many_lines', env={'CLIPPY_CONF_DIR': 'review'})
+errors = [d for d in lints.diagnostics if d.level == 'error']
+sizes = check('.', 'llvm-lines', '--lib', diagnostics=False).text
+```
+
+### Integration snapshots
+
+`fastws.integrate` builds several repos together while people or agents keep editing them. `integrate` snapshots each repo's working tree as a commit (untracked files included, ignored files not), checks each commit out as a detached worktree under one root, and writes the root's Cargo config. `HEAD` and the index of each live repo don't change. The config is the workspace's, with the patches for crates under the root pointing at the root's worktrees, so a build there reads the snapshots and every other local crate from the workspace. Keep the root outside the workspace, where `ws-sync` and uv don't treat its worktrees as members.
+
+`errors` checks each snapshot in turn and keeps the errors in that repo's own files. A repo's check also reports its dependencies' errors, under paths outside the repo, and each dependency's own check already covers those. `owners` reads each owner's path globs from the bullets under a Markdown file's `Files` heading, one ``- Owner: `glob` `glob` `` line each, in order. `by_owner` groups each repo's compiler messages by owner, then by file, and the first owner whose globs match a path owns it. It prefixes each path with its repo's name, so a path into a sibling repo, such as `../rustymath/src/x.rs` from basedpl's check, groups as `rustymath/src/x.rs`. `run_tests` with `--no-fail-fast` runs every test binary, each within its own `timeout`, so a slow or crashing binary doesn't stop the others. `code_count` counts the Rust code lines in a sequence of lines, leaving out blanks and comments. `code_lines` applies it to each Rust file under a directory. `exhash`'s `Journal.stat(count=code_count)` counts the code lines that edits add and remove. `record` writes a run's messages, each repo's test `Results` with each failure's output, and any sizes, as a Markdown record, and returns each owner's message count.
+
+```python
+from fastws.cargo import run_tests
+from fastws.integrate import by_owner, code_lines, errors, integrate, owners, record
+
+root = '~/git/integration'
+commits = integrate({'basedpl': '~/aai-ws/basedpl', 'rustymath': '~/aai-ws/rustymath'}, root)
+errs = errors(root, ['rustymath', 'basedpl'])
+groups = by_owner(errs, owners('~/aai-ws/basedpl/meta/owners.md'))
+tests = {r: run_tests(f'{root}/{r}', '--no-fail-fast') for r in errs if not errs[r]}
+sizes = {r: code_lines(f'{root}/{r}/src') for r in errs}
+counts = record(f'{root}/run8.md', 'Run 8', commits, groups, tests=tests, sizes=sizes)
+```
 ### `ws-sync`
 
 Syncing proceeds in this order:
@@ -264,6 +293,8 @@ Sync also defaults `[term] quiet = true` in that file to suppress routine Cargo 
 Do not commit a `Cargo.lock` generated under these patches. Its source-less local entries cannot be resolved on another machine.
 
 Sync writes `.cargo/rustc-lock` and makes it Cargo's `rustc-wrapper`. The script runs each rustc call holding the timing lock shared (see `cargo develop` above). Inside the lock it runs the wrapper that the config named before sync first wrote the script, where another tool set one, and otherwise `sccache` when it's installed, so unchanged compilation units are reused across the workspace's otherwise-independent Cargo target directories. Later syncs keep that inner wrapper. The script costs about 9 ms a rustc call, mostly the Python interpreter's start. If `sccache` isn't installed, sync warns with the install command (`cargo install sccache --locked`) and continues; rerun `ws-sync` after installing to enable it. On Windows, where the lock does nothing, the config keeps another tool's wrapper, or else names `sccache`.
+
+For an isolated build workspace, `fastws.core.cargo_setup(root)` regenerates these Cargo patches and the same compiler wrapper without pulling, syncing Python or building.
 
 Fastws discovers JavaScript packages directly under the workspace root. It reads each package's `workspaces` list for declared nested packages. These lists accept paths and globs. Fastws ignores undeclared nested packages. Lockfiles do not affect discovery. `[tool.fastws].exclude` matches paths relative to the workspace root. Fastws skips `node_modules` and directories whose names start with `.` or `_`.
 

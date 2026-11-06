@@ -1,7 +1,7 @@
 r"Build, test and install Cargo artifacts for mixed Rust/Python projects."
-import json, os, re, shutil, subprocess, sys, sysconfig, time
+import json, os, re, shutil, signal, subprocess, sys, sysconfig, time
 from collections import Counter
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import NamedTuple
 from . import store
@@ -18,9 +18,13 @@ def settings(root):
     return tomllib.loads((Path(root).expanduser()/'pyproject.toml').read_text()).get('tool', {})
 
 
+def _dev_profile(root):
+    return settings(root).get('fastws', {}).get('dev-profile', 'test') if (root/'pyproject.toml').exists() else 'test'
+
+
 def cargo(root, *args):
-    "Run Cargo in the project and return its standard output."
-    return subprocess.run(['cargo', *args], cwd=Path(root).expanduser(), stdout=subprocess.PIPE, text=True, check=True).stdout
+    "Run Cargo in the project and return its standard output. A failure raises `CalledProcessError`, holding Cargo's standard error."
+    return subprocess.run(['cargo', *args], cwd=Path(root).expanduser(), capture_output=True, text=True, check=True).stdout
 
 
 def members(root):
@@ -28,32 +32,39 @@ def members(root):
     return {Path(p['manifest_path']) for p in json.loads(cargo(root, 'metadata', '--no-deps', '--format-version', '1'))['packages']}
 
 
-def check(root):
-    "Check every target of the workspace with Cargo. Cargo's messages are in the result's `stderr`, which `diagnostics` reads."
-    return subprocess.run(['cargo', 'check', '--all-targets', '--message-format=short'], cwd=Path(root).expanduser(), stderr=subprocess.PIPE, text=True)
-
-
 _TEST = re.compile(r'^test (.+) \.\.\. (ok|FAILED|ignored)')
 _FAILURE = re.compile(r'^---- (.+) std(?:out|err) ----$')
-_DIAGNOSTIC = re.compile(r'^(\S.*?):(\d+):(\d+): (warning|error)(?:\[\w+\])?: (.*)$')
 
 
 class Diagnostic(NamedTuple):
-    "A compiler message, read from Cargo's short format."
+    "A compiler message at its primary span, read from Cargo's JSON messages."
     path:str; line:int; col:int; level:str; message:str
-    def __str__(self): return f'{self.level}: {self.path}:{self.line}: {self.message}'
+    code:str|None=None # The error code or lint, such as `E0308` or `clippy::too_many_lines`
+    def __str__(self): return f'{self.level}{f"[{self.code}]" if self.code else ""}: {self.path}:{self.line}: {self.message}'
 
 
-def diagnostics(text):
-    "Each `Diagnostic` in `text`, which holds Cargo's short-format messages, such as `check`'s `stderr`."
-    return [Diagnostic(m[1], int(m[2]), int(m[3]), m[4], m[5]) for l in text.splitlines() if (m := _DIAGNOSTIC.match(l))]
+def _run(root, args, env=None, diagnostics=True):
+    "Run the Cargo subcommand and options `args` in `root`, with the environment variables `env` set: its exit status, its output, each `Diagnostic` once, and Cargo's other JSON messages, such as artifacts. With `diagnostics`, Cargo writes JSON messages and the output renders each compiler message short; without, the output is as Cargo printed it."
+    flags = ('--message-format=json-diagnostic-short',) if diagnostics else ()
+    p = bounded(['cargo', args[0], *flags, *args[1:]], seconds=None, merge=True, cwd=root, env=os.environ | (env or {}))
+    if not diagnostics: return p.returncode, p.stdout, [], []
+    text, found, rest = [], [], []
+    for line in p.stdout.splitlines(keepends=True):
+        if not line.startswith('{'): text.append(line); continue
+        m = json.loads(line)
+        if m['reason'] != 'compiler-message': rest.append(m); continue
+        msg = m['message']
+        text.append(msg['rendered'])
+        if s := next((s for s in msg['spans'] if s['is_primary']), None):
+            found.append(Diagnostic(s['file_name'], s['line_start'], s['column_start'], msg['level'], msg['message'], (msg['code'] or {}).get('code')))
+    return p.returncode, ''.join(text), list(dict.fromkeys(found)), rest
 
 
 def _lines(text, n=20, tail=False):
-    "Up to `n` lines of `text`, indented, from its end if `tail`, with a count of the lines left out."
+    "Up to `n` lines of `text` (None: all), indented, from its end if `tail`, with a count of the lines left out."
     lines = text.splitlines()
+    if n is None or len(lines) <= n: return [f'    {l}' for l in lines]
     shown = [f'    {l}' for l in (lines[-n:] if tail else lines[:n])]
-    if len(lines) <= n: return shown
     more = f'    … {len(lines)-n} more lines'
     return [more, *shown] if tail else [*shown, more]
 
@@ -67,10 +78,11 @@ class Suite:
     failures:dict # Each failing test's captured output
     summary:str # libtest's `test result:` line, empty for a binary that crashed or has its own harness
     failed:bool # Did the binary exit unsuccessfully?
+    timed_out:bool=False # Was the binary killed for running out of time?
 
     @classmethod
-    def read(cls, name, lines, returncode):
-        "Read one binary's lines and exit status."
+    def read(cls, name, lines, returncode, timed_out=False):
+        "Read one binary's lines and exit status, and whether it was killed for running out of time."
         failures, current = {}, None
         for line in lines:
             if m := _FAILURE.match(line): current = failures.setdefault(m[1], [])
@@ -78,41 +90,57 @@ class Suite:
             elif current is not None: current.append(line)
         return cls(name, '\n'.join(lines), {m[1]: m[2] for l in lines if (m := _TEST.match(l))},
                    {k: '\n'.join(v).strip('\n') for k,v in failures.items()},
-                   next((l for l in lines if l.startswith('test result: ')), ''), bool(returncode))
+                   next((l for l in lines if l.startswith('test result: ')), ''), bool(returncode), timed_out)
 
     def __str__(self):
         n = Counter(self.tests.values())
         status = ', '.join(f'{n[o]} {w}' for o,w in [('ok', 'passed'), ('FAILED', 'failed'), ('ignored', 'ignored')] if n[o])
-        if self.failed and not n['FAILED']: status = f'{status}, then failed' if status else 'failed'
+        if self.failed and not n['FAILED']:
+            end = 'ran out of time' if self.timed_out else 'failed'
+            status = f'{status}, then {end}' if status else end
         time = f' in {m[1]}' if (m := re.search(r'finished in (\S+)$', self.summary)) else ''
         return f'{self.name}: {status or "ok"}{time}'
 
 
 @dataclass
 class Results:
-    "A build's compiler messages and each native test binary's results. It displays as a summary: the compiler messages, each binary that ran tests, and each failure's output."
+    "A Cargo run's outcome, its compiler messages and, for tests, each native test binary's results. It displays as a summary: the outcome, the compiler messages with errors first, each binary that ran tests, and each failure's output."
+    command:str # The Cargo subcommand, such as `test` or `clippy`
     returncode:int
     text:str # The build's messages and each binary's merged standard output and standard error
     diagnostics:list # Each `Diagnostic` from the build, before the first binary ran
-    suites:list # Each binary's `Suite`, in execution order
+    suites:list=field(default_factory=list) # Each test binary's `Suite`, in execution order
     seconds:float=0 # Wall time spent executing native test binaries, excluding compilation
 
     @property
     def ok(self): return self.returncode == 0
 
-    def __repr__(self):
-        res = ['cargo test passed' if self.ok else f'cargo test failed with exit status {self.returncode}']
+    def summary(self, lines:int|None=20):
+        "The outcome, compiler messages, each binary's result and each failure's output, with up to `lines` lines of each output (None: all)"
+        res = [f'cargo {self.command} passed' if self.ok else f'cargo {self.command} failed with exit status {self.returncode}']
         diags = sorted(self.diagnostics, key=lambda d: d.level != 'error')
-        res += [str(d) for d in diags[:20]]
-        if len(diags) > 20: res.append(f'{len(diags)-20} more compiler messages in `diagnostics`')
+        res += [str(d) for d in diags[:lines]]
+        if lines is not None and len(diags) > lines: res.append(f'{len(diags)-lines} more compiler messages in `diagnostics`')
         ran = [s for s in self.suites if s.tests or not s.summary]
         for s in ran:
             res.append(str(s))
-            for t,out in s.failures.items(): res += [f'  FAILED {t}', *_lines(out)]
-            if s.failed and not s.failures: res += _lines(s.output, tail=True)
+            for t,out in s.failures.items(): res += [f'  FAILED {t}', *_lines(out, lines)]
+            if s.failed and not s.failures: res += _lines(s.output, lines, tail=True)
         if idle := len(self.suites) - len(ran): res.append(f'{idle} test binaries ran no tests')
-        if not (self.ok or self.suites or diags): res += _lines(self.text, tail=True)
+        if not (self.ok or self.suites or diags): res += _lines(self.text, lines, tail=True)
         return '\n'.join(res)
+    __repr__ = summary
+
+
+def check(
+    root, # A Cargo package or workspace (expands `~`)
+    *args, # The Cargo subcommand and its options, such as `'clippy', '--all-targets', '--', '-W', 'clippy::pedantic'`; none: `check --all-targets`
+    env:dict=None, # Environment variables to set for the run, such as `{'CLIPPY_CONF_DIR': '/path/to/review'}`
+    diagnostics:bool=True, # Ask Cargo for JSON compiler messages? False runs a subcommand that rejects `--message-format`, such as `llvm-lines`, with no diagnostics
+)->Results:
+    "Run a Cargo subcommand and return its `Results`, with each compiler message as a `Diagnostic`. A failing run is a result, not an exception."
+    args = args or ('check', '--all-targets')
+    return Results(args[0], *_run(Path(root).expanduser(), args, env, diagnostics)[:3])
 
 
 def run_tests(
@@ -120,33 +148,28 @@ def run_tests(
     *args, # Cargo build/selection options, such as `'--test', 'core'` or `'--profile', 'checked'`; `--no-fail-fast` runs every binary
     test_args=(), # Arguments passed directly to each test binary, such as `('name', '--nocapture')`
     env:dict=None, # Environment variables to set for the run, such as `{'BASEDPL_COSTS': '1'}`
-    timeout:float=30 # Seconds shared by all native test binaries after building, raising `TimeoutError` on expiry; None: no limit
+    timeout:float=30 # Seconds that each native test binary may run after building; None: no limit
 )->Results:
-    "Build native tests once, with no time limit, then run Cargo's reported executables directly from their package directories. Source edits after building cannot trigger another build; results describe the compiled build, not the latest working tree. `timeout` covers the binaries together, excluding compilation. Doctests are not run. This takes no timing lock: rustc's wrapper and tests that time own their holds."
-    root, env = Path(root).expanduser().resolve(), os.environ | {'CARGO_TERM_QUIET': 'false', 'CARGO_TERM_COLOR': 'never'} | (env or {})
-    built = bounded(['cargo', 'test', '--no-run', '--message-format=json-diagnostic-short', *args], seconds=None, merge=True, cwd=root, env=env)
-    text, artifacts = [], []
-    for line in built.stdout.splitlines(keepends=True):
-        if not line.startswith('{'): text.append(line); continue
-        m = json.loads(line)
-        if m['reason'] == 'compiler-message': text.append(m['message']['rendered'])
-        elif m['reason'] == 'compiler-artifact' and m['profile']['test'] and m.get('executable'): artifacts.append(m)
-    text = ''.join(text)
-    found = list(dict.fromkeys(diagnostics(text)))
-    if built.returncode: return Results(built.returncode, text, found, [])
+    "Build native tests once, with no time limit, then run Cargo's reported executables directly from their package directories. Source edits after building cannot trigger another build; results describe the compiled build, not the latest working tree. `timeout` bounds each binary on its own, excluding compilation. A binary that runs out of time is killed and reported as a failed binary whose suite is `timed_out`. An omitted profile uses tool.fastws.dev-profile, or test. Doctests are not run. This takes no timing lock: rustc's wrapper and tests that time own their holds."
+    root, env = Path(root).expanduser().resolve(), {'CARGO_TERM_QUIET': 'false', 'CARGO_TERM_COLOR': 'never'} | (env or {})
+    has_profile = any(a in ('-r', '--release', '--profile') or isinstance(a, str) and a.startswith('--profile=') for a in args)
+    if not has_profile: args += ('--profile', _dev_profile(root))
+    code, text, found, rest = _run(root, ('test', '--no-run', *args), env)
+    if code: return Results('test', code, text, found)
+    artifacts = [m for m in rest if m['reason'] == 'compiler-artifact' and m['profile']['test'] and m.get('executable')]
     suites, code, start = [], 0, time.monotonic()
     for m in artifacts:
         package = Path(m['manifest_path']).parent
         name = Path(m['target']['src_path']).relative_to(package).as_posix()
         if 'test' not in m['target']['kind']: name = 'unittests ' + name
-        left = None if timeout is None else max(0, timeout - (time.monotonic() - start))
-        p = bounded([m['executable'], *test_args], left, merge=True, cwd=package, env=env | {'CARGO_MANIFEST_DIR': str(package)})
-        suites.append(Suite.read(name, p.stdout.splitlines(), p.returncode))
+        try: p, late = bounded([m['executable'], *test_args], timeout, merge=True, cwd=package, env=os.environ | env | {'CARGO_MANIFEST_DIR': str(package)}), False
+        except TimeoutError as e: p, late = subprocess.CompletedProcess(m['executable'], -signal.SIGKILL, f'{e}\n'), True
+        suites.append(Suite.read(name, p.stdout.splitlines(), p.returncode, late))
         text += f'     Running {name} ({m["executable"]})\n' + p.stdout
         if p.returncode:
             code = p.returncode
             if '--no-fail-fast' not in args: break
-    return Results(code, text, found, suites, time.monotonic() - start)
+    return Results('test', code, text, found, suites, time.monotonic() - start)
 
 
 def sources(root):
@@ -223,15 +246,15 @@ def replace(source, destination):
     return destination
 
 
-def develop(root):
-    "Serialize this project's cooperating develop runs through build, artifact capture, installation, generator and wheel data. Raw Cargo commands do not take this lock."
+def develop(root, *, profile=None):
+    "Serialize this project's cooperating develop runs through build, artifact capture, installation, generator and wheel data. An omitted profile uses tool.fastws.dev-profile, or test. Raw Cargo commands do not take this lock."
     root = Path(root).expanduser()
     with store.building(root) as started:
         tool = settings(root)
         cfg = tool['maturin']
         if 'python-source' not in cfg: raise ConfigError(r'cargo develop requires tool.maturin.python-source')
         binaries = tool.get('fastws', {}).get('native-binaries', False)
-        artifacts = build(root, binaries=binaries, profile='test')
+        artifacts = build(root, binaries=binaries, profile=profile or _dev_profile(root))
         artifact, = [m for m in artifacts if 'cdylib' in m['target']['crate_types']]
         lib, = [Path(f) for f in artifact['filenames'] if Path(f).suffix in ('.dylib', '.so', '.dll')]
         module = cfg.get('module-name', artifact['target']['name'])

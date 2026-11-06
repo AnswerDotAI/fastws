@@ -1,6 +1,6 @@
 "Fast workspace tools for multi-repo management."
 
-__all__ = ["ws_setup", "ws_clone", "ws_pull", "ws_status", "ws_branches", "ws_build", "ws_sync", "ws_add", "ws_remove", "cargo_setup", "cargo_develop", "cargo_stage", "cargo_wait"]
+__all__ = ["ws_setup", "ws_clone", "ws_pull", "ws_status", "ws_branches", "ws_build", "ws_sync", "ws_add", "ws_remove", "cargo_develop", "cargo_stage", "cargo_wait", "cargo_setup"]
 
 import ast, fnmatch, glob, hashlib, json, os, re, shlex, shutil, subprocess, sys, time
 from pathlib import Path
@@ -570,10 +570,11 @@ def _cli_errors():
 def cargo_develop(
     command: str = 'develop', # Subcommand name supplied by Cargo
     path: str = '.', # Rust/Python project directory
+    profile: str = None, # Cargo profile; default: tool.fastws.dev-profile, or test
 ):
     r"Build and install a mixed Rust/Python project's extension and opted-in binaries."
     from .cargo import develop
-    with _cli_errors(): develop(Path(path).resolve())
+    with _cli_errors(): develop(Path(path).resolve(), profile=profile)
 
 @call_parse(pos=['command'])
 def cargo_stage(
@@ -602,12 +603,12 @@ def cargo_wait(
     patience: int = 1800, # Seconds to wait before giving up
 ):
     r"Wait until a Cargo workspace compiles, checking again after each edit to its local packages' sources."
-    from .cargo import check, diagnostics, sources
+    from .cargo import check, sources
     root, start = Path(path).resolve(), time.monotonic()
     with _cli_errors(): srcs = sources(root)
     while (res := check(root)).returncode:
-        if time.monotonic() - start > patience: raise SystemExit(f'{res.stderr}gave up after {patience} s')
-        print(next((str(d) for d in diagnostics(res.stderr) if d.level == 'error'), res.stderr.strip() or 'cargo check failed'), file=sys.stderr)
+        if time.monotonic() - start > patience: raise SystemExit(f'{res.text}gave up after {patience} s')
+        print(next((str(d) for d in res.diagnostics if d.level == 'error'), res.text.strip() or 'cargo check failed'), file=sys.stderr)
         before = _newest(srcs)
         while (now := _newest(srcs)) == before and time.monotonic() - start < patience: time.sleep(1)
         while True:
@@ -720,6 +721,13 @@ def _strip_patch_tables(content: str) -> str:
         content = content[:m.start()] + content[end:]
     return content
 
+def _patch_text(tables: dict) -> str:
+    "TOML `[patch.*]` tables for `tables`, which maps each source URL to its crates' source specs"
+    return "\n".join(
+        (f"[patch.{url}]" if url == "crates-io" else f'[patch."{url}"]') + "\n"
+        + "".join(f"{name} = {_fmt_source(spec)}\n" for name, spec in sorted(entries.items()))
+        for url, entries in tables.items() if entries)
+
 def _entry_changes(current, new):
     "Added and removed keys, in the order supplied."
     return [k for k in new if k not in current], [k for k in current if k not in new]
@@ -730,6 +738,10 @@ def cargo_setup(root):
     _sync_cargo_wrapper(root)
     return _sync_cargo_patches(root)
 
+<<<<<<< HEAD
+=======
+
+>>>>>>> aba41c9 (fixes #56)
 def _sync_cargo_patches(root: Path) -> tuple[list[str], list[str]]:
     """Regenerate workspace Cargo patches, default to quiet output, and return (added, removed).
 
@@ -761,10 +773,7 @@ def _sync_cargo_patches(root: Path) -> tuple[list[str], list[str]]:
     for url, entries in desired.items():
         cur = tables.setdefault(url, {})
         for name, path in entries.items(): cur.setdefault(name, {"path": path})
-    body = "\n".join(
-        (f"[patch.{url}]" if url == "crates-io" else f'[patch."{url}"]') + "\n"
-        + "".join(f"{name} = {_fmt_source(spec)}\n" for name, spec in sorted(entries.items()))
-        for url, entries in tables.items() if entries)
+    body = _patch_text(tables)
     new = (_strip_patch_tables(content).rstrip() + "\n\n" + body).lstrip() + "\n" if body else _strip_patch_tables(content)
     if new == original: return [], []
     tomllib.loads(new)  # never write an unparseable config
