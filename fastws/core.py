@@ -738,10 +738,6 @@ def cargo_setup(root):
     _sync_cargo_wrapper(root)
     return _sync_cargo_patches(root)
 
-<<<<<<< HEAD
-=======
-
->>>>>>> aba41c9 (fixes #56)
 def _sync_cargo_patches(root: Path) -> tuple[list[str], list[str]]:
     """Regenerate workspace Cargo patches, default to quiet output, and return (added, removed).
 
