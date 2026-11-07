@@ -1,5 +1,14 @@
 <!-- do not remove -->
 
+## 0.0.34
+
+### New Features
+
+- Fix Suite.read so captured stdout of passing tests under successes: is no longer parsed as failures; only match failures inside failures ([#57](https://github.com/AnswerDotAI/fastws/issues/57))
+- Add fastws.integrate snapshots, generic cargo check with JSON diagnostics, per-binary test timeouts, and dev-profile setting ([#56](https://github.com/AnswerDotAI/fastws/issues/56))
+- Add `cargo_setup` to regenerate Cargo patches and compile-lock wrapper without pulling or building ([#55](https://github.com/AnswerDotAI/fastws/issues/55))
+
+
 ## 0.0.33
 
 ### New Features
