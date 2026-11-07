@@ -228,7 +228,11 @@ Use it when another process's unfinished edits stop the workspace compiling, suc
 
 ### Rust builds and tests from Python
 
-`fastws.cargo.run_tests` builds native tests once with Cargo, without a time limit, then runs the executables that Cargo reports directly from their package directories. Each binary gets its own `timeout`, 30 seconds by default, excluding compilation. A binary still running when its `timeout` ends is killed and counts as a failed binary, with its suite's `timed_out` set. Source edits between building and running do not trigger another build: the results describe the compiled build, not necessarily the latest working tree. It supports directly runnable native tests, not cross-target runners.
+`fastws.cargo.run_tests` builds native tests once with Cargo, without a time limit, then runs the executables that Cargo reports directly from their package directories. Each binary gets its own `timeout`, 30 seconds by default, excluding compilation. Outside `FASTWS_JOB`, a timed-out binary is reported as a failed suite with `timed_out` set. Inside a marked job, its timeout raises so the job owner can clean up descendants. Source edits between building and running do not trigger another build: the results describe the compiled build, not necessarily the latest working tree. It supports directly runnable native tests, not cross-target runners.
+
+Where a root has `.config/nextest.toml`, `cargo nextest run` runs the built tests instead: each test in its own process, every binary at once, with the config's slow-test timeouts and groups. `profiles` lists the nextest profiles to run one after another, `('default',)` unless given. `timeout` bounds each profile's run, and each binary's results come from nextest's JUnit report, which lists no ignored tests. `--profile NAME` passes to nextest as `--cargo-profile NAME`, and `test_args` follow `--`.
+
+`root` can also be a list of roots, which build one after another. Roots without nextest then run their binaries in turn. Each profile then runs at the same time in every root whose config defines it: tests in different roots share a phase, and no phase starts before the previous one ends. Suite names start with the root's directory name, and with several profiles also with the profile, as in `app timed: tests/speed.rs`. A failure ends the run after its profile unless `--no-fail-fast` is given.
 
 The default profile is `[tool.fastws].dev-profile`, or `test` when unset. Explicit `--profile NAME`, `--profile=NAME`, `--release` and `-r` override it. Pass Cargo build/selection options positionally, and test filters and harness options in `test_args`. A failed binary stops the run unless `--no-fail-fast` is given. Results contain compiler diagnostics and each binary's outcomes and captured failures.
 
@@ -237,6 +241,7 @@ from fastws.cargo import run_tests
 
 native = run_tests('.', '--no-fail-fast')
 focused = run_tests('.', '--test', 'core', test_args=('test_name', '--nocapture'))
+phased = run_tests(['app', 'lib'], profiles=('untimed', 'timed'))
 ```
 
 Doctests are deliberately not run; keep executable examples in ordinary Rust tests. `run_tests` accepts `env` overrides and `timeout=None` to disable its watchdog. It takes no timing lock around the run: rustc's wrapper owns its shared holds, and tests that time own their exclusive holds.
@@ -286,7 +291,7 @@ Fastws maintains `tool.uv.workspace.exclude`. It excludes unlisted top-level dir
 
 Existing globs, entries for missing directories, and entries for checkouts that are still not Python projects are retained. Use `exclude = [...]` under `[tool.fastws]` to specify exclusions the scan cannot infer, such as keeping a valid project out of the workspace. Adding members preserves hand-written `[tool.uv.sources]` entries, including path and Git sources.
 
-Each sync regenerates Cargo overrides in the workspace's `.cargo/config.toml`. `[patch.crates-io]` gets an entry for each local crate, including nested Cargo workspace members, except a crate marked `publish = false`, which never comes from crates.io. Git dependencies that name local crates get entries under the matching URL. Builds under the workspace root use these local checkouts. Entries pointing outside the root and other configuration sections are preserved.
+Each sync regenerates Cargo overrides in the workspace's `.cargo/config.toml`. `[patch.crates-io]` gets an entry for each local crate, including nested Cargo workspace members, that some local manifest requires from crates.io: by version alone, without `path`, `git` or `workspace`, in any dependency table or `[workspace.dependencies]`. Git dependencies that name local crates get entries under the matching URL. Builds under the workspace root use these local checkouts. Entries pointing outside the root and other configuration sections are preserved.
 
 Sync also defaults `[term] quiet = true` in that file to suppress routine Cargo output and warnings. An explicit `quiet = false` is preserved.
 

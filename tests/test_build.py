@@ -1,4 +1,4 @@
-import subprocess, pytest, fastws.core as core
+import shutil, subprocess, pytest, fastws.core as core
 from fastws.cargo import build, check, run_tests, Suite
 
 
@@ -46,10 +46,10 @@ def test_build_diagnostics(tmp_path, capfd, body, diagnostic):
     assert checked.ok == (diagnostic != 'error') and [(d.path, d.level) for d in checked.diagnostics] == ([('dep/src/lib.rs', diagnostic)] if diagnostic else [])
 
 
-def test_run_tests(tmp_path):
-    (tmp_path/'Cargo.toml').write_text('[package]\nname = "app"\nversion = "0.1.0"\nedition = "2021"\n')
-    (tmp_path/'src').mkdir()
-    (tmp_path/'src/lib.rs').write_text('''pub fn unused() { let x = 1; }
+def _test_crate(root):
+    (root/'Cargo.toml').write_text('[package]\nname = "app"\nversion = "0.1.0"\nedition = "2021"\n')
+    (root/'src').mkdir()
+    (root/'src/lib.rs').write_text('''pub fn unused() { let x = 1; }
 pub fn two() -> i32 { 2 }
 #[cfg(test)] mod t {
     #[test] fn passes() {}
@@ -60,10 +60,14 @@ pub fn two() -> i32 { 2 }
     }
 }
 ''')
-    (tmp_path/'tests').mkdir()
-    (tmp_path/'tests/more.rs').write_text('#[test] fn other() { assert_eq!(app::two(), 2); }\n')
-    (tmp_path/'.cargo').mkdir()
-    (tmp_path/'.cargo/config.toml').write_text('[term]\nquiet = true\n')
+    (root/'tests').mkdir()
+    (root/'tests/more.rs').write_text('#[test] fn other() { assert_eq!(app::two(), 2); }\n')
+    (root/'.cargo').mkdir()
+    (root/'.cargo/config.toml').write_text('[term]\nquiet = true\n')
+
+
+def test_run_tests(tmp_path):
+    _test_crate(tmp_path)
     r = run_tests(tmp_path, '--no-fail-fast')
     assert not r.ok
     assert [(d.path, d.line, d.level, d.code) for d in r.diagnostics] == [('src/lib.rs', 1, 'warning', 'unused_variables')]
@@ -83,6 +87,43 @@ pub fn two() -> i32 { 2 }
     assert not r.ok and not r.suites and 'missing' in r.text
     for args in [('--profile', 'test'), ('--profile=test',), ('--release',), ('-r',)]:
         assert run_tests(tmp_path, '--test', 'more', *args).ok
+
+
+@pytest.mark.skipif(not shutil.which('cargo-nextest'), reason='needs cargo-nextest')
+def test_run_tests_nextest(tmp_path):
+    _test_crate(tmp_path)
+    (tmp_path/'.config').mkdir()
+    (tmp_path/'.config/nextest.toml').write_text('[profile.default]\nfail-fast = false\n')
+    r = run_tests(tmp_path)
+    assert not r.ok and [(d.path, d.level) for d in r.diagnostics] == [('src/lib.rs', 'warning')]
+    suites = {s.name: s for s in r.suites}
+    unit, more = suites['unittests src/lib.rs'], suites['tests/more.rs']
+    assert unit.tests == {'t::passes': 'ok', 't::fails': 'FAILED'} and unit.failed and 'broken' in unit.failures['t::fails']
+    assert more.tests == {'other': 'ok'} and not more.failed
+    assert run_tests(tmp_path, '--test', 'more', '--profile', 'test').ok
+    slow = run_tests(tmp_path, '--lib', test_args=('skipped', '--ignored'), timeout=5)
+    s, = slow.suites
+    assert not slow.ok and s.timed_out and str(s) == 'nextest: ran out of time'
+
+
+@pytest.mark.skipif(not shutil.which('cargo-nextest'), reason='needs cargo-nextest')
+def test_run_tests_profiles(tmp_path):
+    a, b = tmp_path/'a', tmp_path/'b'
+    for d in a, b: (d/'.config').mkdir(parents=True)
+    _test_crate(a)
+    (a/'.config/nextest.toml').write_text('[profile.one]\ndefault-filter = "test(passes) | test(other)"\n[profile.two]\ndefault-filter = "test(fails)"\n')
+    (b/'Cargo.toml').write_text('[package]\nname = "b"\nversion = "0.1.0"\nedition = "2021"\n')
+    (b/'src').mkdir()
+    (b/'src/lib.rs').write_text('')
+    (b/'tests').mkdir()
+    (b/'tests/fine.rs').write_text('#[test] fn fine() {}\n')
+    (b/'.config/nextest.toml').write_text('[profile.one]\n')
+    r = run_tests([a, b], profiles=('one', 'two'))
+    tests = {s.name: s.tests for s in r.suites if s.tests}
+    assert not r.ok and tests == {'a one: unittests src/lib.rs': {'t::passes': 'ok'}, 'a one: tests/more.rs': {'other': 'ok'},
+                                  'b one: tests/fine.rs': {'fine': 'ok'}, 'a two: unittests src/lib.rs': {'t::fails': 'FAILED'}}
+    first = run_tests([a, b], profiles=('two', 'one'))
+    assert not first.ok and {s.name for s in first.suites if s.tests} == {'a two: unittests src/lib.rs'}
 
 
 def test_captured_test_output():

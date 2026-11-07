@@ -684,19 +684,30 @@ def _cargo_patches(root: Path):
             patches[(_repo_key(url), name)] = path if path.is_absolute() else (config.parent/path).resolve()
     return patches, config
 
-def _crate_pkgs(d: Path):
-    "(`[package]` table, dir) for the crate at `d` and its cargo workspace members"
+def _crate_manifests(d: Path):
+    "(parsed `Cargo.toml`, dir) for the crate or workspace at `d` and each of its cargo workspace members"
     try: data = tomllib.loads((d/"Cargo.toml").read_text())
     except tomllib.TOMLDecodeError: return
-    if "name" in (pkg := data.get("package", {})): yield pkg, d
+    yield data, d
     for m in _project_dirs(d, "Cargo.toml", data.get("workspace", {}).get("members", [])):
         try: sub = tomllib.loads((m/"Cargo.toml").read_text())
         except tomllib.TOMLDecodeError: continue
-        if "name" in (pkg := sub.get("package", {})): yield pkg, m
+        yield sub, m
+
+def _crate_pkgs(d: Path):
+    "(`[package]` table, dir) for the crate at `d` and its cargo workspace members"
+    for data, m in _crate_manifests(d):
+        if "name" in (pkg := data.get("package", {})): yield pkg, m
 
 def _local_crates(root: Path) -> list[tuple[dict, Path]]:
     "(`[package]` table, dir) for every crate under `root`, nested cargo workspace members included"
     return [p for crate in _crate_dirs(root) for p in _crate_pkgs(crate)]
+
+def _registry_requirements(root: Path) -> set[str]:
+    "Packages that some manifest under `root` requires from crates.io: a version with no `path`, `git`, `registry` or `workspace` key"
+    return {spec.get("package", name) if isinstance(spec, dict) else name
+            for crate in _crate_dirs(root) for data, _ in _crate_manifests(crate) for deps in _cargo_dep_tables(data, every=True)
+            for name, spec in deps.items() if isinstance(spec, str) or isinstance(spec, dict) and not {"path", "git", "registry", "workspace"} & spec.keys()}
 
 def _git_dep_tables(root: Path, crates: dict[str, Path]) -> dict[str, dict[str, Path]]:
     "Git URL -> {package: local dir} for members' git deps that name a local crate"
@@ -741,15 +752,16 @@ def cargo_setup(root):
 def _sync_cargo_patches(root: Path) -> tuple[list[str], list[str]]:
     """Regenerate workspace Cargo patches, default to quiet output, and return (added, removed).
 
-    Every local crate gets a `[patch.crates-io]` entry, except one marked `publish = false`, which never comes
-    from crates.io. A member's git dep on a local crate gets an entry under that URL. Builds anywhere under `root`
-    then use the checkouts: the cargo analog of editable installs. Only entries whose path is inside `root` are
-    managed; entries pointing elsewhere (and any other config sections) are kept as-is, and a kept entry wins
-    over a generated one of the same name."""
+    A local crate gets a `[patch.crates-io]` entry only where some local manifest requires it from crates.io
+    (`_registry_requirements`); Cargo uses no other patch. A member's git dep on a local crate gets an entry under
+    that URL. Builds anywhere under `root` then use the checkouts: the cargo analog of editable installs. Only
+    entries whose path is inside `root` are managed; entries pointing elsewhere (and any other config sections) are
+    kept as-is, and a kept entry wins over a generated one of the same name."""
     root = root.resolve()
     pkgs = _local_crates(root)
     crates = {pkg["name"]: d for pkg, d in pkgs}
-    desired = {"crates-io": {pkg["name"]: str(d) for pkg, d in pkgs if pkg.get("publish") is not False}}
+    required = _registry_requirements(root)
+    desired = {"crates-io": {name: str(d) for name, d in crates.items() if name in required}}
     for url, entries in _git_dep_tables(root, crates).items(): desired[url] = {name: str(d) for name, d in entries.items()}
     config = root/".cargo"/"config.toml"
     original = content = config.read_text() if config.exists() else ""
@@ -816,10 +828,13 @@ def _sync_cargo_wrapper(root: Path):
     config.parent.mkdir(exist_ok=True)
     config.write_text(new)
 
-def _cargo_dep_tables(data):
-    for name in "dependencies","build-dependencies": yield data.get(name, {})
+def _cargo_dep_tables(data, every=False):
+    "A manifest's dependency and build-dependency tables, top-level and per target; with `every`, its dev-dependency tables and `[workspace.dependencies]` too"
+    names = ("dependencies", "build-dependencies", "dev-dependencies")[:3 if every else 2]
+    for name in names: yield data.get(name, {})
     for target in data.get("target", {}).values():
-        for name in "dependencies","build-dependencies": yield target.get(name, {})
+        for name in names: yield target.get(name, {})
+    if every: yield data.get("workspace", {}).get("dependencies", {})
 
 def _patched_cargo_deps(crate: Path, patches):
     data = tomllib.loads((crate/"Cargo.toml").read_text())

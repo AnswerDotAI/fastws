@@ -1,11 +1,13 @@
 r"Build, test and install Cargo artifacts for mixed Rust/Python projects."
-import json, os, re, shutil, signal, subprocess, sys, sysconfig, time
+import json, os, re, shutil, signal, subprocess, sys, sysconfig, tempfile, time
 from collections import Counter
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import NamedTuple
+from xml.etree import ElementTree
 from . import store
-from .procs import bounded
+from .procs import bounded, JOB_ENV
 from ._toml import tomllib
 
 
@@ -143,32 +145,115 @@ def check(
     return Results(args[0], *_run(Path(root).expanduser(), args, env, diagnostics)[:3])
 
 
-def run_tests(
-    root, # A Cargo package or workspace (expands `~`)
-    *args, # Cargo build/selection options, such as `'--test', 'core'` or `'--profile', 'checked'`; `--no-fail-fast` runs every binary
-    test_args=(), # Arguments passed directly to each test binary, such as `('name', '--nocapture')`
-    env:dict=None, # Environment variables to set for the run, such as `{'BASEDPL_COSTS': '1'}`
-    timeout:float=30 # Seconds that each native test binary may run after building; None: no limit
-)->Results:
-    "Build native tests once, with no time limit, then run Cargo's reported executables directly from their package directories. Source edits after building cannot trigger another build; results describe the compiled build, not the latest working tree. `timeout` bounds each binary on its own, excluding compilation. A binary that runs out of time is killed and reported as a failed binary whose suite is `timed_out`. An omitted profile uses tool.fastws.dev-profile, or test. Doctests are not run. This takes no timing lock: rustc's wrapper and tests that time own their holds."
-    root, env = Path(root).expanduser().resolve(), {'CARGO_TERM_QUIET': 'false', 'CARGO_TERM_COLOR': 'never'} | (env or {})
-    has_profile = any(a in ('-r', '--release', '--profile') or isinstance(a, str) and a.startswith('--profile=') for a in args)
-    if not has_profile: args += ('--profile', _dev_profile(root))
-    code, text, found, rest = _run(root, ('test', '--no-run', *args), env)
-    if code: return Results('test', code, text, found)
-    artifacts = [m for m in rest if m['reason'] == 'compiler-artifact' and m['profile']['test'] and m.get('executable')]
-    suites, code, start = [], 0, time.monotonic()
+def _bounded(cmd, timeout, **kwargs):
+    "`bounded(cmd, timeout, merge=True, **kwargs)`, and whether it ran out of time. Outside `FASTWS_JOB`, a timeout gives a killed process's result; inside a marked job, it raises so the job's owner can clean up descendants."
+    try: return bounded(cmd, timeout, merge=True, **kwargs), False
+    except TimeoutError as e:
+        if os.environ.get(JOB_ENV): raise
+        return subprocess.CompletedProcess(cmd, -signal.SIGKILL, f'{e}\n'), True
+
+
+def _suite_name(m):
+    "The `Suite` name of the test binary that Cargo artifact `m` describes: its target's source, prefixed `unittests ` unless it's an integration test."
+    name = Path(m['target']['src_path']).relative_to(Path(m['manifest_path']).parent).as_posix()
+    return name if 'test' in m['target']['kind'] else 'unittests ' + name
+
+
+def _binary_id(m, packages):
+    "nextest's id for the test binary that Cargo artifact `m` describes, such as `app`, `app::more` or `app::bin/app`. `packages` maps package ids to names."
+    pkg, kind, name = packages[m['package_id']], m['target']['kind'][0], m['target']['name']
+    if kind == 'test': return f'{pkg}::{name}'
+    return f'{pkg}::{kind}/{name}' if kind in ('bin', 'example', 'bench') else pkg
+
+
+def _junit(path, names):
+    "Each binary's `Suite` from nextest's JUnit report at `path`. `names` maps nextest's binary ids to suite names. Ignored tests don't appear."
+    suites = []
+    for ts in ElementTree.parse(path).getroot().iter('testsuite'):
+        tests, failures, late = {}, {}, False
+        for tc in ts.iter('testcase'):
+            t, bad = tc.get('name'), next(iter(tc.findall('failure') + tc.findall('error')), None)
+            tests[t] = 'ok' if bad is None else 'FAILED'
+            if bad is None: continue
+            failures[t] = '\n'.join(s for s in (tc.findtext('system-out', '').strip('\n'), tc.findtext('system-err', '').strip('\n') or bad.text or '') if s)
+            late |= 'timeout' in bad.get('type', '')
+        suites.append(Suite(names.get(ts.get('name'), ts.get('name')), '\n\n'.join(failures.values()), tests, failures, '', bool(failures), late))
+    return suites
+
+
+def _nextest(root, args, test_args, env, timeout, artifacts, profile='default'):
+    "Run the built tests with `cargo nextest run --profile profile` under `timeout` as a whole: its exit status, its output, each binary's `Suite` and the run's seconds. Cargo's `--profile` in `args` becomes nextest's `--cargo-profile`."
+    packages = {p['id']: p['name'] for p in json.loads(cargo(root, 'metadata', '--format-version', '1', '--no-deps'))['packages']}
+    names = {_binary_id(m, packages): _suite_name(m) for m in artifacts}
+    args = [re.sub(r'^--profile(?==|$)', '--cargo-profile', a) for a in map(str, args)]
+    with tempfile.TemporaryDirectory() as d:
+        report, tool = Path(d)/'junit.xml', Path(d)/'fastws.toml'
+        tool.write_text(f'[profile.{profile}.junit]\npath = {json.dumps(str(report))}\n')
+        cmd = ['cargo', 'nextest', 'run', '--tool-config-file', f'fastws:{tool}', '--profile', profile, '--show-progress=none', '--color=never', *args, *(('--', *test_args) if test_args else ())]
+        start = time.monotonic()
+        p, late = _bounded(cmd, timeout, cwd=root, env=os.environ | env)
+        suites = _junit(report, names) if report.exists() else [Suite('nextest', p.stdout, {}, {}, '', True, late)]
+    return p.returncode, p.stdout, suites, time.monotonic() - start
+
+
+def _libtest(root, args, test_args, env, timeout, artifacts):
+    "Run each built test binary in turn from its package directory under `timeout`: the first failing exit status, the output and each binary's `Suite`. Without `--no-fail-fast` in `args`, the first failing binary ends the run."
+    code, text, suites = 0, '', []
     for m in artifacts:
-        package = Path(m['manifest_path']).parent
-        name = Path(m['target']['src_path']).relative_to(package).as_posix()
-        if 'test' not in m['target']['kind']: name = 'unittests ' + name
-        try: p, late = bounded([m['executable'], *test_args], timeout, merge=True, cwd=package, env=os.environ | env | {'CARGO_MANIFEST_DIR': str(package)}), False
-        except TimeoutError as e: p, late = subprocess.CompletedProcess(m['executable'], -signal.SIGKILL, f'{e}\n'), True
+        package, name = Path(m['manifest_path']).parent, _suite_name(m)
+        p, late = _bounded([m['executable'], *test_args], timeout, cwd=package, env=os.environ | env | {'CARGO_MANIFEST_DIR': str(package)})
         suites.append(Suite.read(name, p.stdout.splitlines(), p.returncode, late))
         text += f'     Running {name} ({m["executable"]})\n' + p.stdout
         if p.returncode:
-            code = p.returncode
+            code = code or p.returncode
             if '--no-fail-fast' not in args: break
+    return code, text, suites
+
+
+def _nextest_profiles(root):
+    "The nextest profiles that `root`'s `.config/nextest.toml` defines, `default` included, or None without that file."
+    config = root/'.config/nextest.toml'
+    return {'default', *tomllib.loads(config.read_text()).get('profile', {})} if config.exists() else None
+
+
+def run_tests(
+    root, # A Cargo package or workspace (expands `~`), or a list of them
+    *args, # Cargo build/selection options, such as `'--test', 'core'` or `'--profile', 'checked'`; `--no-fail-fast` runs every binary
+    test_args=(), # Arguments passed directly to each test binary, such as `('name', '--nocapture')`; nextest gets them after `--`
+    env:dict=None, # Environment variables to set for the run, such as `{'BASEDPL_COSTS': '1'}`
+    timeout:float=30, # Seconds that each native test binary, or each nextest run of one profile in one root, may take after building; None: no limit
+    profiles:tuple=('default',) # The nextest profiles to run in turn, each at once in every root whose `.config/nextest.toml` defines it
+)->Results:
+    "Build native tests once per root, with no time limit, then run Cargo's reported executables directly from their package directories. Where a root has `.config/nextest.toml`, `cargo nextest run` runs them instead, each test in its own process, once for each of `profiles` that its config defines, and each binary's results come from nextest's JUnit report. Several roots build in turn. Roots without nextest then run in turn, and each profile then runs in every root that defines it at once. Without `--no-fail-fast`, a failure ends the run after its binary, or after its profile. With several roots, each suite's name starts with its root's directory name, and with several profiles, with the profile. Source edits after building cannot trigger another build; results describe the compiled build, not the latest working tree. `timeout` bounds each binary, or each root's run of a profile, excluding compilation. Outside `FASTWS_JOB`, a run that runs out of time is reported as a failed suite with `timed_out` set. Inside a marked job, the timeout raises so its owner can clean up descendants. An omitted Cargo profile uses each root's tool.fastws.dev-profile, or test. Doctests are not run. This takes no timing lock: rustc's wrapper and tests that time own their holds."
+    roots = [Path(r).expanduser().resolve() for r in (root if isinstance(root, (list, tuple)) else [root])]
+    env = {'CARGO_TERM_QUIET': 'false', 'CARGO_TERM_COLOR': 'never'} | (env or {})
+    has_profile = any(a in ('-r', '--release', '--profile') or isinstance(a, str) and a.startswith('--profile=') for a in args)
+    text, found, built = '', [], []
+    for r in roots:
+        rargs = args if has_profile else (*args, '--profile', _dev_profile(r))
+        code, out, diags, rest = _run(r, ('test', '--no-run', *rargs), env)
+        text, found = text + out, found + diags
+        if code: return Results('test', code, text, found)
+        artifacts = [m for m in rest if m['reason'] == 'compiler-artifact' and m['profile']['test'] and m.get('executable')]
+        built.append((r, rargs, artifacts, _nextest_profiles(r)))
+    def named(r, p, suites):
+        "`suites`, freshly read, renamed for root `r` and profile `p` where several roots or profiles ran"
+        t = ' '.join(x for x in (r.name if len(roots) > 1 else '', p if p and len(profiles) > 1 else '') if x)
+        for s in suites: s.name = f'{t}: {s.name}' if t else s.name
+        return t, suites
+    fail_fast, code, suites, start = '--no-fail-fast' not in args, 0, [], time.monotonic()
+    for r, rargs, artifacts, defined in built:
+        if defined is not None: continue
+        c, out, ss = _libtest(r, rargs, test_args, env, timeout, artifacts)
+        text, suites, code = text + out, suites + named(r, None, ss)[1], code or c
+        if code and fail_fast: return Results('test', code, text, found, suites, time.monotonic() - start)
+    for p in profiles:
+        jobs = [(r, rargs, artifacts) for r, rargs, artifacts, defined in built if p in (defined or ())]
+        with ThreadPoolExecutor(max(len(jobs), 1)) as ex: runs = list(ex.map(lambda j: _nextest(j[0], j[1], test_args, env, timeout, j[2], p), jobs))
+        for (r, _, _), (c, out, ss, _) in zip(jobs, runs):
+            t, ss = named(r, p, ss)
+            text, suites, code = text + (f'     Nextest profile {p} in {r}\n' if t else '') + out, suites + ss, code or c
+        if code and fail_fast: break
     return Results('test', code, text, found, suites, time.monotonic() - start)
 
 

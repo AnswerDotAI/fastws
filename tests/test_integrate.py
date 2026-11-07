@@ -27,6 +27,8 @@ def test_config_points_only_the_roots_crates_at_the_root(tmp_path):
         f'[build]\nrustc-wrapper = "/lock"\n\n[patch.crates-io]\na = {{ path = "{workspace}/a" }}\nb = {{ path = "{workspace}/b" }}\n')
     (root/"a").mkdir(parents=True)
     (root/"a"/"Cargo.toml").write_text('[package]\nname = "a"\nversion = "0.1.0"\n')
+    (root/"c").mkdir()
+    (root/"c"/"Cargo.toml").write_text('[package]\nname = "c"\nversion = "0.1.0"\n\n[dependencies]\na = "0.1"\n')
     _config(root, workspace)
     config = tomllib.loads((root/".cargo"/"config.toml").read_text())
     assert config["build"]["rustc-wrapper"] == "/lock"

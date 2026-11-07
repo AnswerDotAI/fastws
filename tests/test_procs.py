@@ -1,4 +1,4 @@
-import fcntl, os, subprocess, sys, pytest
+import fcntl, os, subprocess, sys, threading, pytest
 from fastws.procs import JOB_ENV, kill_group
 
 
@@ -25,10 +25,17 @@ time.sleep(60)
 '''
     with subprocess.Popen([sys.executable, '-c', job], start_new_session=True, env=os.environ | {JOB_ENV: '1'},
                           stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True) as p:
-        try:
-            with pytest.raises(subprocess.TimeoutExpired): p.communicate(timeout=.8)
+        lines, survived = [], threading.Event()
+        def read():
+            for line in p.stdout:
+                lines.append(line)
+                if line.startswith('job survived inner timeout'): survived.set()
+        reader = threading.Thread(target=read, daemon=True)
+        reader.start()
+        try: assert survived.wait(10), ''.join(lines)
         finally: kill_group(p)
-        output, _ = p.communicate(timeout=2)
+        reader.join(2)
+    output = ''.join(lines)
     group = output.split('job group ')[1].split()[0]
     assert f'child group {group} 1' in output and f'descendant group {group}' in output
     assert 'job survived inner timeout' in output
