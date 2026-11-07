@@ -83,10 +83,10 @@ class Suite:
     @classmethod
     def read(cls, name, lines, returncode, timed_out=False):
         "Read one binary's lines and exit status, and whether it was killed for running out of time."
-        failures, current = {}, None
+        failures, current, in_failures = {}, None, False
         for line in lines:
-            if m := _FAILURE.match(line): current = failures.setdefault(m[1], [])
-            elif line == 'failures:': current = None
+            if line in ('successes:', 'failures:'): current, in_failures = None, line == 'failures:'
+            elif in_failures and (m := _FAILURE.match(line)): current = failures.setdefault(m[1], [])
             elif current is not None: current.append(line)
         return cls(name, '\n'.join(lines), {m[1]: m[2] for l in lines if (m := _TEST.match(l))},
                    {k: '\n'.join(v).strip('\n') for k,v in failures.items()},

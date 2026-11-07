@@ -1,5 +1,5 @@
 import subprocess, pytest, fastws.core as core
-from fastws.cargo import build, check, run_tests
+from fastws.cargo import build, check, run_tests, Suite
 
 
 def _mk_proj(root, name, extra=''):
@@ -83,3 +83,14 @@ pub fn two() -> i32 { 2 }
     assert not r.ok and not r.suites and 'missing' in r.text
     for args in [('--profile', 'test'), ('--profile=test',), ('--release',), ('-r',)]:
         assert run_tests(tmp_path, '--test', 'more', *args).ok
+
+
+def test_captured_test_output():
+    for failed in (False, True):
+        lines = ['test passes ... ok', 'successes:', '---- passes stdout ----', 'printed', 'successes:', 'passes']
+        if failed:
+            lines[1:1] = ['test fails ... FAILED']
+            lines += ['failures:', '---- fails stdout ----', 'broken', 'failures:', 'fails']
+        lines.append(f'test result: {"FAILED" if failed else "ok"}. 1 passed; {int(failed)} failed; 0 ignored')
+        s = Suite.read('unit', lines, int(failed))
+        assert s.failures == ({'fails': 'broken'} if failed else {}) and 'printed' in s.output
