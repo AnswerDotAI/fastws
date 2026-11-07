@@ -957,8 +957,10 @@ def _npm_install(root: Path):
     except json.JSONDecodeError:
         print(res.stdout, file=sys.stderr, end="")
         raise
-    if data.get("audit", {}).get("vulnerabilities", {}).get("total") or data.get("unreviewedScripts"):
-        print(f"npm install findings ({root}):\n{res.stdout}", file=sys.stderr, end="")
+    findings = {}
+    if data.get("audit", {}).get("vulnerabilities", {}).get("total"): findings["audit"] = data["audit"]
+    if data.get("unreviewedScripts"): findings["unreviewedScripts"] = data["unreviewedScripts"]
+    if findings: print(f"npm install findings ({root}):\n{json.dumps(findings, indent=2)}", file=sys.stderr)
 
 def _sync_js(root: Path, members: list[Path]) -> list[Path]:
     "Install the JS workspace, run every native member's build script, and return those members. Cargo handles incremental compilation."
