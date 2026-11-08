@@ -1,5 +1,12 @@
 <!-- do not remove -->
 
+## 0.0.35
+
+### New Features
+
+- nextest ([#58](https://github.com/AnswerDotAI/fastws/issues/58))
+
+
 ## 0.0.34
 
 ### New Features
