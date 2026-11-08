@@ -4,6 +4,7 @@
 
 ### New Features
 
+- Print only relevant npm install findings (audit, unreviewedScripts) as formatted JSON instead of the full raw output ([#59](https://github.com/AnswerDotAI/fastws/issues/59))
 - nextest ([#58](https://github.com/AnswerDotAI/fastws/issues/58))
 
 
