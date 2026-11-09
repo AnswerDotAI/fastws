@@ -1,4 +1,4 @@
-import shutil, subprocess, pytest, fastws.core as core
+import json, shutil, subprocess, pytest, fastws.core as core
 from fastws.cargo import build, check, run_tests, Suite
 
 
@@ -26,8 +26,10 @@ requires = ["external"]''')
 
 
 @pytest.mark.parametrize('body, diagnostic', [('', ''), ('let unused = 1;', 'warning'), ('compile_error!("broken");', 'error')])
-def test_build_diagnostics(tmp_path, capfd, body, diagnostic):
-    (tmp_path/'pyproject.toml').write_text('[tool.maturin]\n')
+def test_build_diagnostics(tmp_path, capfd, monkeypatch, body, diagnostic):
+    (tmp_path/'pyproject.toml').write_text('[tool.maturin]\n[tool.fastws]\ncargo = '+json.dumps(shutil.which('cargo'))+'\n')
+    monkeypatch.delenv('UV_PROJECT_ENVIRONMENT', raising=False)
+    monkeypatch.setenv('VIRTUAL_ENV', str(tmp_path/'.venv'))
     (tmp_path/'Cargo.toml').write_text('[package]\nname = "app"\nversion = "0.1.0"\n[dependencies]\ndep = { path = "dep" }\n')
     (tmp_path/'src').mkdir()
     (tmp_path/'src/lib.rs').write_text('extern crate dep; pub use dep::run;')
@@ -90,8 +92,11 @@ def test_run_tests(tmp_path):
 
 
 @pytest.mark.skipif(not shutil.which('cargo-nextest'), reason='needs cargo-nextest')
-def test_run_tests_nextest(tmp_path):
+def test_run_tests_nextest(tmp_path, monkeypatch):
     _test_crate(tmp_path)
+    (tmp_path/'pyproject.toml').write_text('[tool.fastws]\ncargo = '+json.dumps(shutil.which('cargo'))+'\n')
+    monkeypatch.delenv('UV_PROJECT_ENVIRONMENT', raising=False)
+    monkeypatch.setenv('VIRTUAL_ENV', str(tmp_path/'.venv'))
     (tmp_path/'.config').mkdir()
     (tmp_path/'.config/nextest.toml').write_text('[profile.default]\nfail-fast = false\n')
     r = run_tests(tmp_path)

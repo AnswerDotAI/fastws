@@ -24,9 +24,22 @@ def _dev_profile(root):
     return settings(root).get('fastws', {}).get('dev-profile', 'test') if (root/'pyproject.toml').exists() else 'test'
 
 
+def _cargo_command(*args, env=None):
+    "One Cargo and optional shared paths for every launch, including nextest's subordinate Cargo calls."
+    from .core import _fastws_cfg, _ws_root
+    environment = os.environ | (env or {})
+    workspace = _ws_root()
+    cfg = _fastws_cfg(workspace)
+    configured = cfg.get('cargo')
+    executable = str(workspace/Path(configured).expanduser()) if configured else 'cargo'
+    for key, variable in [('cargo-root-dir', 'CARGO_UNSTABLE_ROOT_DIR'), ('cargo-target-dir', 'CARGO_TARGET_DIR')]:
+        if key in cfg: environment.setdefault(variable, str(workspace/Path(cfg[key]).expanduser()))
+    return [executable, *args], environment | {'CARGO': executable}
+
 def cargo(root, *args):
     "Run Cargo in the project and return its standard output. A failure raises `CalledProcessError`, holding Cargo's standard error."
-    return subprocess.run(['cargo', *args], cwd=Path(root).expanduser(), capture_output=True, text=True, check=True).stdout
+    cmd, env = _cargo_command(*args)
+    return subprocess.run(cmd, cwd=Path(root).expanduser(), env=env, capture_output=True, text=True, check=True).stdout
 
 
 def members(root):
@@ -48,7 +61,10 @@ class Diagnostic(NamedTuple):
 def _run(root, args, env=None, diagnostics=True):
     "Run the Cargo subcommand and options `args` in `root`, with the environment variables `env` set: its exit status, its output, each `Diagnostic` once, and Cargo's other JSON messages, such as artifacts. With `diagnostics`, Cargo writes JSON messages and the output renders each compiler message short; without, the output is as Cargo printed it."
     flags = ('--message-format=json-diagnostic-short',) if diagnostics else ()
-    p = bounded(['cargo', args[0], *flags, *args[1:]], seconds=None, merge=True, cwd=root, env=os.environ | (env or {}))
+    cmd, env = _cargo_command(args[0], *flags, *args[1:], env=env)
+    p = bounded(cmd, seconds=None, merge=True, cwd=root, env=env)
+    if log := env.get('FASTWS_CARGO_LOG'):
+        with Path(log).expanduser().open('a') as capture: capture.write(p.stdout)
     if not diagnostics: return p.returncode, p.stdout, [], []
     text, found, rest = [], [], []
     for line in p.stdout.splitlines(keepends=True):
@@ -189,9 +205,9 @@ def _nextest(root, args, test_args, env, timeout, artifacts, profile='default'):
     with tempfile.TemporaryDirectory() as d:
         report, tool = Path(d)/'junit.xml', Path(d)/'fastws.toml'
         tool.write_text(f'[profile.{profile}.junit]\npath = {json.dumps(str(report))}\n')
-        cmd = ['cargo', 'nextest', 'run', '--tool-config-file', f'fastws:{tool}', '--profile', profile, '--show-progress=none', '--color=never', *args, *(('--', *test_args) if test_args else ())]
+        cmd, env = _cargo_command('nextest', 'run', '--tool-config-file', f'fastws:{tool}', '--profile', profile, '--show-progress=none', '--color=never', *args, *(('--', *test_args) if test_args else ()), env=env)
         start = time.monotonic()
-        p, late = _bounded(cmd, timeout, cwd=root, env=os.environ | env)
+        p, late = _bounded(cmd, timeout, cwd=root, env=env)
         suites = _junit(report, names) if report.exists() else [Suite('nextest', p.stdout, {}, {}, '', True, late)]
     return p.returncode, p.stdout, suites, time.monotonic() - start
 
@@ -311,7 +327,10 @@ def build(
     for flag, active in [('all-features', all_features), ('no-default-features', no_default_features)]:
         if active or cfg.get(flag): cmd.append('--' + flag)
     extra, env = _maturin_flags(target, os.environ) if for_maturin else ([], None)
-    result = subprocess.run(['cargo', *cmd, *extra], cwd=root, stdout=subprocess.PIPE, text=True, env=env)
+    cmd, env = _cargo_command(*cmd, *extra, env=env)
+    result = subprocess.run(cmd, cwd=root, stdout=subprocess.PIPE, text=True, env=env)
+    if log := env.get('FASTWS_CARGO_LOG'):
+        with Path(log).expanduser().open('a') as capture: capture.write(result.stdout)
     messages = [json.loads(line) for line in result.stdout.splitlines()]
     for m in messages:
         if m.get('reason') != 'compiler-message': continue

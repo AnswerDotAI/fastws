@@ -182,6 +182,12 @@ cargo develop --profile quick
 
 Run from the project root, or give its directory with `--path`. The command reads `python-source`, `module-name`, `manifest-path` and features from `[tool.maturin]`. `[tool.fastws] dev-profile = "quick"` selects a project's default for both `cargo develop` and `fastws.cargo.run_tests`. Without that setting they use `test`. An explicit `--profile NAME` overrides the project default. The project must produce a `cdylib` and set `python-source`. Define the selected profile in `Cargo.toml` and keep incremental compilation enabled for the local crate.
 
+The workspace's `[tool.fastws] cargo = "/path/to/cargo"` optionally selects one explicit Cargo executable for fastws builds, checks, metadata and tests, including nextest's subordinate Cargo calls. A missing executable fails without falling back. With no selection, subprocess uses its normal PATH and working-directory rules. Upstream Cargo stays installed and usable; manifests, profiles, features and package selection are unchanged.
+
+Optional workspace `cargo-root-dir` and `cargo-target-dir` settings pass through Cargo's `CARGO_UNSTABLE_ROOT_DIR` and `CARGO_TARGET_DIR` environment variables. Paths are absolute or relative to the fastws workspace, and explicit caller/environment values win. No Cargo configuration files are rewritten. Sharing path-crate artifacts needs a Cargo that uses the same root for metadata and source paths: ordinary Cargo's `-Zroot-dir` alone is insufficient. Remove the settings to return to normal Cargo behavior.
+
+Set `FASTWS_CARGO_LOG` to a file to append the raw Cargo output already captured by builds, checks and test-compilation/listing calls; no log is created by default.
+
 Make the initial editable installation through `ws-sync` or maturin. Repeat that installation when package metadata or entry points change. Running Python processes keep the extension they loaded.
 
 Cargo must already build a loadable Python extension. For PyO3 extension-module builds on macOS, configure the linker in `build.rs` with `pyo3_build_config::add_extension_module_link_args()`. This command does not inject maturin's extra compiler flags.
