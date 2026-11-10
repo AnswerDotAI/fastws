@@ -171,6 +171,7 @@ def test_sync_cargo_patches_generates_and_preserves(tmp_path):
     config = tmp_path/'.cargo'/'config.toml'
     config.write_text('[term]\nquiet = true\n\n[patch.crates-io]\n'
         f'foreign = {{ path = "/elsewhere/foreign" }}\ngone = {{ path = "{tmp_path}/gone" }}\n')
+    config.write_text(core._replace_table(config.read_text(), 'unstable', 'checksum-freshness = true'))
     crate1, helper = tmp_path/'crate1', tmp_path/'helper'
     crate1.mkdir(); helper.mkdir()
     (crate1/'Cargo.toml').write_text('[package]\nname = "crate1"\nversion = "0.1.0"\n\n[dependencies]\nfamily = { git = "https://example.com/family" }\n'
@@ -182,7 +183,7 @@ def test_sync_cargo_patches_generates_and_preserves(tmp_path):
         '\n[workspace.dependencies]\nhelper = "0.1"\ncrate1 = { path = "../crate1", version = "0.1" }\n')
     (family/'sub'/'Cargo.toml').write_text('[package]\nname = "family-sub"\nversion = "0.1.0"\n')
 
-    added, removed = core._sync_cargo_patches(tmp_path)
+    added, removed = core._sync_cargo_patches(tmp_path, root_dir=True)
     data = core.tomllib.loads(config.read_text())
     cio = data['patch']['crates-io']
     assert set(cio) == {'foreign', 'family-sub', 'helper'}  # only crates that a local manifest requires from crates.io; `crate1` is required by path
@@ -192,6 +193,9 @@ def test_sync_cargo_patches_generates_and_preserves(tmp_path):
     assert data['patch']['https://example.com/family']['family']['path'] == str(family)  # git deps on local crates get their URL table, published or not
     assert data['term']['quiet'] is True  # other sections untouched
     assert set(added) == {'family', 'family-sub', 'helper'} and removed == ['gone']
+    assert data['unstable'] == {'root-dir': str(tmp_path), 'checksum-freshness': True}
+    before = config.read_text()
+    assert core._sync_cargo_patches(tmp_path) == ([], []) and config.read_text() == before
 
 
 def test_sync_ws_package_json_preserves_local_and_merges_shared(tmp_path):

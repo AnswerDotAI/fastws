@@ -32,14 +32,13 @@ def _cargo_command(*args, env=None):
     cfg = _fastws_cfg(workspace)
     configured = cfg.get('cargo')
     executable = str(workspace/Path(configured).expanduser()) if configured else 'cargo'
-    for key, variable in [('cargo-root-dir', 'CARGO_UNSTABLE_ROOT_DIR'), ('cargo-target-dir', 'CARGO_TARGET_DIR')]:
-        if key in cfg: environment.setdefault(variable, str(workspace/Path(cfg[key]).expanduser()))
+    if 'cargo-target-dir' in cfg: environment.setdefault('CARGO_TARGET_DIR', str(workspace/Path(cfg['cargo-target-dir']).expanduser()))
     return [executable, *args], environment | {'CARGO': executable}
 
-def cargo(root, *args):
+def cargo(root, *args, env=None):
     "Run Cargo in the project and return its standard output. A failure raises `CalledProcessError`, holding Cargo's standard error."
-    cmd, env = _cargo_command(*args)
-    return subprocess.run(cmd, cwd=Path(root).expanduser(), env=env, capture_output=True, text=True, check=True).stdout
+    cmd, env = _cargo_command(*args, env=env)
+    return subprocess.run(cmd, cwd=Path(root).expanduser(), env=env, text=True, capture_output=True, check=True).stdout
 
 
 def members(root):
@@ -60,22 +59,25 @@ class Diagnostic(NamedTuple):
 
 def _run(root, args, env=None, diagnostics=True):
     "Run the Cargo subcommand and options `args` in `root`, with the environment variables `env` set: its exit status, its output, each `Diagnostic` once, and Cargo's other JSON messages, such as artifacts. With `diagnostics`, Cargo writes JSON messages and the output renders each compiler message short; without, the output is as Cargo printed it."
-    flags = ('--message-format=json-diagnostic-short',) if diagnostics else ()
-    cmd, env = _cargo_command(args[0], *flags, *args[1:], env=env)
-    p = bounded(cmd, seconds=None, merge=True, cwd=root, env=env)
+    nextest = args[0] == 'nextest'
+    flags = (('--cargo-message-format=json,json-diagnostic-short' if nextest else '--message-format=json-diagnostic-short'),) if diagnostics else ()
+    at = 2 if nextest else 1
+    cmd, env = _cargo_command(*args[:at], *flags, *args[at:], env=env)
+    # nextest's final JSON can lack a newline; stderr must not join its records.
+    p = bounded(cmd, seconds=None, merge=False, cwd=root, env=env)
     if log := env.get('FASTWS_CARGO_LOG'):
-        with Path(log).expanduser().open('a') as capture: capture.write(p.stdout)
-    if not diagnostics: return p.returncode, p.stdout, [], []
+        with Path(log).expanduser().open('a') as capture: capture.write(p.stdout + '\n' + p.stderr)
+    if not diagnostics: return p.returncode, p.stdout + p.stderr, [], []
     text, found, rest = [], [], []
     for line in p.stdout.splitlines(keepends=True):
         if not line.startswith('{'): text.append(line); continue
         m = json.loads(line)
-        if m['reason'] != 'compiler-message': rest.append(m); continue
+        if m.get('reason') != 'compiler-message': rest.append(m); continue
         msg = m['message']
         text.append(msg['rendered'])
         if s := next((s for s in msg['spans'] if s['is_primary']), None):
             found.append(Diagnostic(s['file_name'], s['line_start'], s['column_start'], msg['level'], msg['message'], (msg['code'] or {}).get('code')))
-    return p.returncode, ''.join(text), list(dict.fromkeys(found)), rest
+    return p.returncode, ''.join(text) + p.stderr, list(dict.fromkeys(found)), rest
 
 
 def _lines(text, n=20, tail=False):
@@ -197,15 +199,21 @@ def _junit(path, names):
     return suites
 
 
-def _nextest(root, args, test_args, env, timeout, artifacts, profile='default'):
-    "Run the built tests with `cargo nextest run --profile profile` under `timeout` as a whole: its exit status, its output, each binary's `Suite` and the run's seconds. Cargo's `--profile` in `args` becomes nextest's `--cargo-profile`."
-    packages = {p['id']: p['name'] for p in json.loads(cargo(root, 'metadata', '--format-version', '1', '--no-deps'))['packages']}
+def _nextest(root, args, test_args, env, timeout, artifacts, reuse, profile='default'):
+    "Run captured test binaries without entering Cargo's build phase, under the profile's execution timeout."
+    metadata, binaries = reuse
+    packages = {p['id']: p['name'] for p in metadata['packages']}
     names = {_binary_id(m, packages): _suite_name(m) for m in artifacts}
-    args = [re.sub(r'^--profile(?==|$)', '--cargo-profile', a) for a in map(str, args)]
     with tempfile.TemporaryDirectory() as d:
         report, tool = Path(d)/'junit.xml', Path(d)/'fastws.toml'
+        cargo_meta, binary_meta = Path(d)/'cargo.json', Path(d)/'binaries.json'
+        cargo_meta.write_text(json.dumps(metadata))
+        binary_meta.write_text(json.dumps(binaries))
         tool.write_text(f'[profile.{profile}.junit]\npath = {json.dumps(str(report))}\n')
-        cmd, env = _cargo_command('nextest', 'run', '--tool-config-file', f'fastws:{tool}', '--profile', profile, '--show-progress=none', '--color=never', *args, *(('--', *test_args) if test_args else ()), env=env)
+        flags = ('--no-fail-fast',) if '--no-fail-fast' in args else ()
+        cmd, env = _cargo_command('nextest', 'run', '--cargo-metadata', cargo_meta, '--binaries-metadata', binary_meta,
+            '--tool-config-file', f'fastws:{tool}', '--profile', profile, '--show-progress=none', '--color=never', *flags,
+            *(('--', *test_args) if test_args else ()), env=env)
         start = time.monotonic()
         p, late = _bounded(cmd, timeout, cwd=root, env=env)
         suites = _junit(report, names) if report.exists() else [Suite('nextest', p.stdout, {}, {}, '', True, late)]
@@ -247,26 +255,37 @@ def run_tests(
     text, found, built = '', [], []
     for r in roots:
         rargs = args if has_profile else (*args, '--profile', _dev_profile(r))
-        code, out, diags, rest = _run(r, ('test', '--no-run', *rargs), env)
+        defined, reuse = _nextest_profiles(r), None
+        if defined is None: code, out, diags, rest = _run(r, ('test', '--no-run', *rargs), env)
+        else:
+            flags = [re.sub(r'^--profile(?==|$)', '--cargo-profile', str(a)) for a in rargs if a != '--no-fail-fast']
+            code, out, diags, rest = _run(r, ('nextest', 'list', '--list-type=binaries-only', '--message-format=json', '--ignore-default-filter', *flags), env)
+            if not code:
+                binaries, = (m for m in rest if 'reason' not in m)
+                host = binaries['rust-build-meta']['platforms']['host']['platform']['triple']
+                # Package filters use nextest's all-feature graph, not the features selected for compilation.
+                try: metadata = json.loads(cargo(r, 'metadata', '--format-version', '1', '--all-features', '--filter-platform', host, env=env))
+                except subprocess.CalledProcessError as e: return Results('test', e.returncode, text + out + e.stderr, found + diags)
+                reuse = metadata, binaries
         text, found = text + out, found + diags
         if code: return Results('test', code, text, found)
-        artifacts = [m for m in rest if m['reason'] == 'compiler-artifact' and m['profile']['test'] and m.get('executable')]
-        built.append((r, rargs, artifacts, _nextest_profiles(r)))
+        artifacts = [m for m in rest if m.get('reason') == 'compiler-artifact' and m['profile']['test'] and m.get('executable')]
+        built.append((r, rargs, artifacts, defined, reuse))
     def named(r, p, suites):
         "`suites`, freshly read, renamed for root `r` and profile `p` where several roots or profiles ran"
         t = ' '.join(x for x in (r.name if len(roots) > 1 else '', p if p and len(profiles) > 1 else '') if x)
         for s in suites: s.name = f'{t}: {s.name}' if t else s.name
         return t, suites
     fail_fast, code, suites, start = '--no-fail-fast' not in args, 0, [], time.monotonic()
-    for r, rargs, artifacts, defined in built:
+    for r, rargs, artifacts, defined, reuse in built:
         if defined is not None: continue
         c, out, ss = _libtest(r, rargs, test_args, env, timeout, artifacts)
         text, suites, code = text + out, suites + named(r, None, ss)[1], code or c
         if code and fail_fast: return Results('test', code, text, found, suites, time.monotonic() - start)
     for p in profiles:
-        jobs = [(r, rargs, artifacts) for r, rargs, artifacts, defined in built if p in (defined or ())]
-        with ThreadPoolExecutor(max(len(jobs), 1)) as ex: runs = list(ex.map(lambda j: _nextest(j[0], j[1], test_args, env, timeout, j[2], p), jobs))
-        for (r, _, _), (c, out, ss, _) in zip(jobs, runs):
+        jobs = [(r, rargs, artifacts, reuse) for r, rargs, artifacts, defined, reuse in built if p in (defined or ())]
+        with ThreadPoolExecutor(max(len(jobs), 1)) as ex: runs = list(ex.map(lambda j: _nextest(j[0], j[1], test_args, env, timeout, j[2], j[3], p), jobs))
+        for (r, _, _, _), (c, out, ss, _) in zip(jobs, runs):
             t, ss = named(r, p, ss)
             text, suites, code = text + (f'     Nextest profile {p} in {r}\n' if t else '') + out, suites + ss, code or c
         if code and fail_fast: break
