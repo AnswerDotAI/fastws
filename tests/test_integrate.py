@@ -1,6 +1,7 @@
-import subprocess
+import json, subprocess
 from fastws._toml import tomllib
 from fastws.integrate import _config, code_lines, owners, snapshot
+from fastws.core import _replace_table
 
 
 def git(repo, *args): return subprocess.run(["git", *args], cwd=repo, check=True, capture_output=True, text=True).stdout
@@ -25,6 +26,9 @@ def test_config_points_only_the_roots_crates_at_the_root(tmp_path):
     (workspace/".cargo").mkdir(parents=True)
     (workspace/".cargo"/"config.toml").write_text(
         f'[build]\nrustc-wrapper = "/lock"\n\n[patch.crates-io]\na = {{ path = "{workspace}/a" }}\nb = {{ path = "{workspace}/b" }}\n')
+    source = workspace/".cargo"/"config.toml"
+    content = _replace_table(source.read_text(), "unstable", f"  root-dir = {json.dumps(str(workspace))}")
+    source.write_text(content.replace("[unstable]", "[unstable] # common source root"))
     (root/"a").mkdir(parents=True)
     (root/"a"/"Cargo.toml").write_text('[package]\nname = "a"\nversion = "0.1.0"\n')
     (root/"c").mkdir()
@@ -33,6 +37,7 @@ def test_config_points_only_the_roots_crates_at_the_root(tmp_path):
     config = tomllib.loads((root/".cargo"/"config.toml").read_text())
     assert config["build"]["rustc-wrapper"] == "/lock"
     assert config["patch"]["crates-io"] == {"a": {"path": str(root/"a")}, "b": {"path": f"{workspace}/b"}}
+    assert config["unstable"]["root-dir"] == str(root)
 
 
 def test_code_lines_skips_blanks_and_comments(tmp_path):

@@ -265,9 +265,9 @@ def _replace_array(content: str, table: str, key: str, values: list[str]) -> str
     return content[:start] + section + content[end:]
 
 def _table_span(content: str, name: str) -> tuple[int,int]|None:
-    m = re.search(rf"(?m)^\[{re.escape(name)}\]\s*$", content)
+    m = re.search(rf"(?m)^[ \t]*\[{re.escape(name)}\][ \t]*(?:#[^\r\n]*)?\r?$", content)
     if not m: return None
-    n = re.search(r"(?m)^\[", content[m.end():])
+    n = re.search(r"(?m)^[ \t]*\[", content[m.end():])
     end = m.end()+n.start() if n else len(content)
     return m.start(), end
 
@@ -743,20 +743,21 @@ def _entry_changes(current, new):
     "Added and removed keys, in the order supplied."
     return [k for k in new if k not in current], [k for k in current if k not in new]
 
-def cargo_setup(root):
-    "Regenerate local Cargo patches and the compile-lock wrapper without pulling or building."
+def cargo_setup(root, *, root_dir=False):
+    "Regenerate local Cargo patches and the compile-lock wrapper without pulling or building; root_dir enables Cargo's common source root."
     root = Path(root).expanduser().resolve()
     _sync_cargo_wrapper(root)
-    return _sync_cargo_patches(root)
+    return _sync_cargo_patches(root, root_dir=root_dir)
 
-def _sync_cargo_patches(root: Path) -> tuple[list[str], list[str]]:
+def _sync_cargo_patches(root: Path, root_dir=False) -> tuple[list[str], list[str]]:
     """Regenerate workspace Cargo patches, default to quiet output, and return (added, removed).
 
     A local crate gets a `[patch.crates-io]` entry only where some local manifest requires it from crates.io
     (`_registry_requirements`); Cargo uses no other patch. A member's git dep on a local crate gets an entry under
     that URL. Builds anywhere under `root` then use the checkouts: the cargo analog of editable installs. Only
     entries whose path is inside `root` are managed; entries pointing elsewhere (and any other config sections) are
-    kept as-is, and a kept entry wins over a generated one of the same name."""
+    kept as-is, and a kept entry wins over a generated one of the same name. An enabled `[unstable] root-dir`
+    follows the actual root; `root_dir` enables it."""
     root = root.resolve()
     pkgs = _local_crates(root)
     crates = {pkg["name"]: d for pkg, d in pkgs}
@@ -767,6 +768,11 @@ def _sync_cargo_patches(root: Path) -> tuple[list[str], list[str]]:
     original = content = config.read_text() if config.exists() else ""
     data = tomllib.loads(content) if content else {}
     old = data.get("patch", {})
+    if root_dir or 'root-dir' in data.get('unstable', {}):
+        span = _table_span(content, 'unstable')
+        body = content[span[0]:span[1]].partition('\n')[2] if span else ''
+        body = re.sub(r'(?m)^[ \t]*root-dir[ \t]*=.*(?:\n|$)', '', body)
+        content = _replace_table(content, 'unstable', f'root-dir = {json.dumps(str(root))}\n{body}')
     if "quiet" not in data.get("term", {}):
         if match := re.search(r"(?m)^\[term\][^\n]*(?:\n|$)", content):
             content = content[:match.end()].rstrip("\n") + "\nquiet = true\n" + content[match.end():]

@@ -110,6 +110,17 @@ def test_run_tests_nextest(tmp_path, monkeypatch):
     s, = slow.suites
     assert not slow.ok and s.timed_out and str(s) == 'nextest: ran out of time'
 
+    # Editing the working tree after capture must not trigger another Cargo build.
+    import fastws.cargo as cargo
+    captured = cargo._nextest
+    def edit_then_run(*args, **kwargs):
+        (tmp_path/'src/lib.rs').write_text('compile_error!("changed after capture");')
+        return captured(*args, **kwargs)
+    monkeypatch.setattr(cargo, '_nextest', edit_then_run)
+    assert run_tests(tmp_path, '--test', 'more').ok
+    (tmp_path/'Cargo.toml').write_text('[package]')
+    assert not run_tests(tmp_path).ok
+
 
 @pytest.mark.skipif(not shutil.which('cargo-nextest'), reason='needs cargo-nextest')
 def test_run_tests_profiles(tmp_path):
@@ -122,11 +133,24 @@ def test_run_tests_profiles(tmp_path):
     (b/'src/lib.rs').write_text('')
     (b/'tests').mkdir()
     (b/'tests/fine.rs').write_text('#[test] fn fine() {}\n')
-    (b/'.config/nextest.toml').write_text('[profile.one]\n')
+    # Package filters use the all-feature graph, including dependencies disabled in this build.
+    dep = b/'optional'
+    (dep/'src').mkdir(parents=True)
+    (dep/'Cargo.toml').write_text((b/'Cargo.toml').read_text().replace('name = "b"', 'name = "optional"'))
+    (dep/'src/lib.rs').write_text('')
+    with (b/'Cargo.toml').open('a') as f: f.write(r'''[workspace]
+members = ["optional"]
+default-members = ["."]
+[dependencies]
+optional = { path = "optional", optional = true }
+''')
+    (b/'.config/nextest.toml').write_text(r'''[profile.one]
+default-filter = "rdeps(optional)"
+''')
     r = run_tests([a, b], profiles=('one', 'two'))
     tests = {s.name: s.tests for s in r.suites if s.tests}
     assert not r.ok and tests == {'a one: unittests src/lib.rs': {'t::passes': 'ok'}, 'a one: tests/more.rs': {'other': 'ok'},
-                                  'b one: tests/fine.rs': {'fine': 'ok'}, 'a two: unittests src/lib.rs': {'t::fails': 'FAILED'}}
+                                  'b one: tests/fine.rs': {'fine': 'ok'}, 'a two: unittests src/lib.rs': {'t::fails': 'FAILED'}}, r.text
     first = run_tests([a, b], profiles=('two', 'one'))
     assert not first.ok and {s.name for s in first.suites if s.tests} == {'a two: unittests src/lib.rs'}
 
