@@ -1,5 +1,13 @@
 <!-- do not remove -->
 
+## 0.0.36
+
+### New Features
+
+- Run nextest from captured builds and configure Cargo's source root ([#61](https://github.com/AnswerDotAI/fastws/pull/61)), thanks to [@jph00](https://github.com/jph00)
+- Add configurable Cargo executable, root/target dir settings, and optional `FASTWS_CARGO_LOG` output capture for all fastws Cargo calls ([#60](https://github.com/AnswerDotAI/fastws/issues/60))
+
+
 ## 0.0.35
 
 ### New Features
