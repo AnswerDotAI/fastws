@@ -443,6 +443,7 @@ def ws_setup(
     repo: str,  # Workspace repository: owner/repo or GitHub URL
     dest: str,  # New workspace directory (must not exist)
     python: str = "3.13",  # Python version for the workspace environment
+    workers: int = None,  # Parallel workers for the initial ws-sync; omit to use its default
 ):
     "Clone a workspace, create its environment, install fastws, and sync without changing the caller's environment."
     root = Path(dest).expanduser().absolute()
@@ -456,7 +457,9 @@ def ws_setup(
         UV_PROJECT=str(root), UV_WORKING_DIR=str(root), PATH=f'{bindir}{os.pathsep}{os.environ["PATH"]}')
     subprocess.run(['uv', 'venv', '--python', python, str(venv)], cwd=root, env=env, check=True)
     subprocess.run(['uv', 'pip', 'install', '--python', str(bindir/'python'), 'fastws-cli>=0.0.14'], cwd=root, env=env, check=True)
-    subprocess.run([str(bindir/'ws-sync'), '--workspace', str(root)], cwd=root, env=env, check=True)
+    sync = [str(bindir/'ws-sync'), '--workspace', str(root)]
+    if workers: sync += ['--workers', str(workers)]
+    subprocess.run(sync, cwd=root, env=env, check=True)
     print(f'Workspace ready: {root}\n\nsource {shlex.quote(str(bindir/"activate"))}\ncd {shlex.quote(str(root))}')
     if (root/'aai-coding/SETUP.md').exists(): print('Then ask your coding agent to follow aai-coding/SETUP.md.')
 
