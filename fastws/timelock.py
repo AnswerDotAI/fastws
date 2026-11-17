@@ -38,10 +38,16 @@ class _Wait:
             time.sleep(0.25)
 
 
+def _open(path):
+    "Open the lock file at `path` for `flock`, creating it if it's missing. Open it read-only when it can't be opened for append, as another user's lock file in `/tmp` can't. `flock` places shared and exclusive locks on a file opened read-only."
+    try: return open(path, 'a')
+    except PermissionError: return open(path)
+
+
 @contextmanager
 def _held(exclusive, quiet=False):
     "Hold `LOCK`, and `GATE` too when exclusive. `quiet` leaves out the message that the wait has started."
-    with open(GATE, 'a') as gate, open(LOCK, 'a') as lock:
+    with _open(GATE) as gate, _open(LOCK) as lock:
         wait = _Wait(exclusive, quiet)
         wait.take(gate)
         wait.take(lock)
