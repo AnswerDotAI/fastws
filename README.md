@@ -157,7 +157,11 @@ ws-branches --expected develop
 
 ### `ws-build`
 
-Build an sdist of each workspace project, including `repos.txt` checkouts outside the root, into `.dists` or a specified output directory. A project is rebuilt only when a file in it is newer than its existing sdist. Rebuilding removes older versions of that package from the output directory. A failed build produces a warning and does not stop the other builds. The command exits with status 1 if any project failed.
+Build Python sdists and npm tarballs into `.dists` or a specified output directory. JavaScript packages use the same workspace discovery as sync; a package needs a name and version to produce an npm artifact. Private or versionless workspace roots can still participate in builds, and mixed Python/JavaScript packages produce both formats when applicable.
+
+If all selected artifacts are current, skip preparation and packaging. Otherwise run the selected packages' declared JavaScript builds in dependency order, using the installed workspace environment, then check freshness again before packaging. This prepares shared assets before either distribution is packaged without rerunning generators on a no-op build. A generated JavaScript consumer also considers its local JS dependencies and the active root dependency lock (`package-lock.json` for npm, `bun.lock` for Bun/pybun). Changes to an ordinary Python runtime dependency do not invalidate every dependent sdist. Packaging uses `uv build --sdist` and native `npm pack` (or `bun pm pack` for Bun/pybun).
+
+Each artifact is staged separately and promoted only after a successful package command. Rebuilding removes older versions of that package, leaving unrelated artifacts alone. A packaging failure reports a warning and does not stop independent packaging jobs; a preparatory build failure stops before packaging. The command exits nonzero on failure.
 
 Progress goes to stderr. On success, the output directory path goes to stdout. Scripts can use `$(ws-build)` to build the packages and obtain that path. Use the distributions with a resolver such as `uv pip install --find-links`, or in a Docker build context that needs unreleased workspace packages:
 
@@ -168,7 +172,7 @@ ws-build --out /tmp/dists
 ws-build --project solveit  # only this package and its transitive workspace dependencies
 ```
 
-`--project` selects by package name and follows declared runtime and build dependencies, including workspace packages in external checkouts. Other packages in the output directory are left untouched. Without it, the whole workspace is built as before.
+`--project` accepts a Python or npm package name. Selection follows local Python runtime/build dependencies and JS runtime/development/optional dependencies, joining both sets for co-located packages. External registered projects and declared nested workspaces participate too. Other packages in the output directory are left untouched. Without it, the whole workspace is selected.
 
 ### `cargo develop`
 
@@ -307,7 +311,7 @@ Sync writes `.cargo/rustc-lock` and makes it Cargo's `rustc-wrapper`. The script
 
 For an isolated build workspace, `fastws.core.cargo_setup(root)` regenerates these Cargo patches and the same compiler wrapper without pulling, syncing Python or building.
 
-Fastws discovers JavaScript packages directly under the workspace root. It reads each package's `workspaces` list for declared nested packages. These lists accept paths and globs. Fastws ignores undeclared nested packages. Lockfiles do not affect discovery. `[tool.fastws].exclude` matches paths relative to the workspace root. Fastws skips `node_modules` and directories whose names start with `.` or `_`.
+Fastws discovers JavaScript packages directly under the workspace root, explicitly registered external repo roots, and paths or globs retained in the root `workspaces` list. It reads each package's own `workspaces` list for declared nested packages. The install, build and distribution graph use these same members; fastws does not scan arbitrary nested package files. Lockfiles do not affect discovery. `[tool.fastws].exclude` matches paths relative to the workspace root. Fastws skips `node_modules` and directories whose names start with `.` or `_`.
 
 Each sync updates `workspaces` in the root `package.json`. It creates the file when needed. It preserves external paths, globs, and unrelated settings. It reports added and removed packages.
 
@@ -317,9 +321,11 @@ Before `uv sync`, fastws regenerates `tool.uv.no-build-isolation-package` with t
 
 After `uv sync`, fastws runs `cargo develop` in mixed Rust/Python projects, with up to one project per CPU building concurrently by default. Cargo skips unchanged compilation inputs. Projects using `fastws.build_backend` should keep only packaging inputs in `tool.uv.cache-keys`; Rust source changes are handled by Cargo. Maturin packages with `bindings = "bin"` keep their existing uv installation path.
 
-Fastws then runs `<tool> install` at the workspace root. After installation, it runs `<tool> run build` in JavaScript packages containing both `Cargo.toml` and a `build` script, under the same project-concurrency limit. Cargo handles incremental compilation. Other build steps still run.
+Fastws then runs `<tool> install` at the workspace root. Native workspaces link local packages whose versions satisfy their consumers' ordinary dependency ranges; consumer manifests need no local paths or special workspace protocol.
 
-`--build-workers` sets the maximum concurrent projects within each of these two build phases, defaulting to the CPU count; `--build-workers 1` runs each phase serially. It is separate from `--workers`, which controls cloning, pulling and dependency updates. Cargo keeps its own within-project parallelism, so increasing project concurrency also increases CPU and memory demand. Cargo may serialize builds that share a target directory.
+After installation, fastws runs each declared JavaScript `build` script, with local dependencies built before their consumers and independent builds sharing the project-concurrency limit. Dependency order follows `dependencies`, `devDependencies` and `optionalDependencies`, including paths through source-ready packages with no build script. Those packages need no build themselves. Cycles among source-ready packages are fine; cycles between actual build tasks are reported. A failed build stops before its consumers run. Packages own their build commands: AnswerStyle's is `nbdev-export`, for example. Python sync runs first, so a repo-list entry such as `AnswerDotAI/answerstyle[dev]` supplies its Python build tools through the normal extras mechanism. No additional install lifecycle hook is needed. Cargo and other build tools retain their own incremental behavior.
+
+`--build-workers` sets the maximum concurrent projects within the Python-native and JavaScript build phases, defaulting to the CPU count; `--build-workers 1` runs each phase serially. It is separate from `--workers`, which controls cloning, pulling and dependency updates. Cargo keeps its own within-project parallelism, so increasing project concurrency also increases CPU and memory demand. Cargo may serialize builds that share a target directory.
 
 For npm, sync hides successful install output and build-command banners. Installs use error-only logging, so npm warnings are hidden while errors and failure output remain visible. Run `npm audit` at the workspace root to inspect audit findings. Build scripts retain their own output; configure their tools to suppress routine progress. Other package managers retain their normal output.
 
@@ -345,7 +351,7 @@ Add a repo to `repos-local.txt`, then run `ws-sync`. Repos already in either lis
 The argument determines how fastws locates the checkout:
 
 - `owner/repo` clones the repository.
-- An existing local folder, such as one created by `nbdev-new` or `ship-new`, uses its `origin` remote to resolve `owner/repo`. The command reports a missing Git repo, GitHub origin, or `pyproject.toml`.
+- An existing local folder uses its `origin` remote to resolve `owner/repo`. It needs a `pyproject.toml`, `Cargo.toml` or `package.json`; Rust-only and JavaScript-only projects need no Python scaffold. The command reports missing project metadata, Git repo or GitHub origin.
 - A path outside the workspace root leaves the checkout in place and records its location in the local list. The checkout needs no root `pyproject.toml`. Sync discovers its packages.
 
 ```bash

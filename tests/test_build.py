@@ -1,4 +1,4 @@
-import json, shutil, subprocess, pytest, fastws.core as core
+import json, shutil, subprocess, tarfile, pytest, fastws.core as core
 from fastws.cargo import build, check, run_tests, Suite
 
 
@@ -15,14 +15,87 @@ name = "{name}"
 def test_build_dependency_selection(tmp_path):
     root = tmp_path/'ws'
     root.mkdir()
-    _mk_proj(root, 'app', r'''dependencies = ["My.Lib>=1"]''')
+    app = _mk_proj(root, 'app', r'''dependencies = ["My.Lib>=1"]''')
     _mk_proj(root, 'my-lib', r'''[build-system]
 requires = ["external"]''')
     external = _mk_proj(tmp_path, 'external', r'''dependencies = ["app", "published-only"]''')
     _mk_proj(root, 'unrelated')
     (root/'repos-local.txt').write_text(f'owner/external {external}')
-    assert {n for n,d in core._build_projects(root, 'repos.txt', 'APP')} == {'app', 'my-lib', 'external'}
-    with pytest.raises(SystemExit, match='No workspace project'): core._build_projects(root, 'repos.txt', 'missing')
+    (app/'package.json').write_text('{"name":"app", "dependencies":{"@example/assets":"^1"}}')
+    assets = root/'tools'/'assets'
+    assets.mkdir(parents=True)
+    (assets.parent/'package.json').write_text('{"private":true,"workspaces":["assets"]}')
+    (assets/'package.json').write_text('{"name":"@example/assets","version":"1.0.0"}')
+    py, packages, _ = core._build_selection(root, 'repos.txt', 'APP')
+    assert {n for n,d in py} == {'app', 'my-lib', 'external'} and set(packages) == {app, assets}
+    assert set(core._build_selection(root, 'repos.txt', '@example/assets')[1]) == {assets}
+    with pytest.raises(SystemExit, match='No workspace project'): core._build_selection(root, 'repos.txt', 'missing')
+
+
+def _archive_text(path, suffix):
+    with tarfile.open(path) as archive:
+        name = next(n for n in archive.getnames() if n.endswith(suffix))
+        return archive.extractfile(name).read().decode()
+
+
+def test_mixed_distributions(tmp_path, capfd):
+    app, styles, out = tmp_path/'app', tmp_path/'styles', tmp_path/'.dists'
+    for d in app, styles: d.mkdir()
+    lock = tmp_path/'package-lock.json'
+    lock.write_text('{"lockfileVersion":3,"packages":{"node_modules/theme":{"version":"1.0.0"}}}')
+    (app/'pyproject.toml').write_text(r'''[project]
+name = "office-app"
+version = "0.1.0"
+[build-system]
+requires = ["setuptools>=77"]
+build-backend = "setuptools.build_meta"
+[tool.setuptools]
+py-modules = ["office_app"]
+''')
+    (app/'office_app.py').write_text('')
+    (app/'MANIFEST.in').write_text('include dist/style.txt')
+    (styles/'source.txt').write_text('first')
+    (styles/'build.js').write_text(r'''const fs = require('node:fs');
+const text = fs.readFileSync('source.txt', 'utf8');
+if (!fs.existsSync('generated.txt') || fs.readFileSync('generated.txt', 'utf8') !== text) fs.writeFileSync('generated.txt', text);
+fs.writeFileSync('_modidx.py', '# generated metadata');
+console.log('exported styles');
+''')
+    (app/'build.js').write_text(r'''const fs = require('node:fs');
+fs.mkdirSync('dist', {recursive:true});
+const version = JSON.parse(fs.readFileSync('../package-lock.json', 'utf8')).packages['node_modules/theme'].version;
+fs.writeFileSync('dist/style.txt', fs.readFileSync('../styles/generated.txt', 'utf8') + ':' + version);
+console.log('bundled app');
+''')
+    style_pkg = {'name':'@example/styles', 'version':'0.1.0', 'files':['generated.txt'], 'scripts':{'build':'node build.js'}}
+    (styles/'package.json').write_text(json.dumps(style_pkg))
+    (app/'package.json').write_text(json.dumps({'name':'@example/app', 'version':'0.1.0', 'files':['dist'],
+        'dependencies':{'@example/styles':'^0.1.0'}, 'scripts':{'build':'node build.js'}}))
+    def build(): core.ws_build(workspace=str(tmp_path), project='office-app', workers=2)
+    build()
+    assert capfd.readouterr().out == f'{out}\n'
+    sdist, = out.glob('*.tar.gz')
+    app_tgz = out/'example-app-0.1.0.tgz'
+    styles_tgz = out/'example-styles-0.1.0.tgz'
+    assert _archive_text(sdist, 'dist/style.txt') == _archive_text(app_tgz, 'dist/style.txt') == 'first:1.0.0'
+
+    # A dependency edit invalidates both generated app distributions, even though dist/ is a build output.
+    (styles/'source.txt').write_text('second')
+    build()
+    assert _archive_text(sdist, 'dist/style.txt') == _archive_text(app_tgz, 'dist/style.txt') == 'second:1.0.0'
+    lock.write_text(lock.read_text().replace('1.0.0', '1.0.1'))
+    build()
+    assert _archive_text(sdist, 'dist/style.txt') == _archive_text(app_tgz, 'dist/style.txt') == 'second:1.0.1'
+    before = {p:p.stat().st_mtime_ns for p in out.iterdir()}
+    build()
+    assert before == {p:p.stat().st_mtime_ns for p in out.iterdir()}
+
+    # npm writes its tarball before postpack. A failed attempt must not replace the last successful artifact.
+    style_pkg['scripts']['postpack'] = 'node -e "process.exit(2)"'
+    (styles/'package.json').write_text(json.dumps(style_pkg))
+    with pytest.raises(SystemExit): build()
+    assert styles_tgz.stat().st_mtime_ns == before[styles_tgz]
+    assert not list(out.glob('.fastws-*'))
 
 
 @pytest.mark.parametrize('body, diagnostic', [('', ''), ('let unused = 1;', 'warning'), ('compile_error!("broken");', 'error')])

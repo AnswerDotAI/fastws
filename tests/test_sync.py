@@ -1,4 +1,4 @@
-import json, os, pytest
+import json, os, shutil, subprocess, sys, pytest
 from fastgit import Git
 import fastws.core as core
 
@@ -205,6 +205,35 @@ def test_sync_ws_package_json_preserves_local_and_merges_shared(tmp_path):
     assert core._sync_ws_package_json(tmp_path, [tmp_path/'app']) == (['app'], ['gone'])
     assert json.loads(pkg.read_text()) == {'name': 'local', 'workspaces': ['../outside', 'tools/*', 'app'],
         'allowScripts': {'other': False, 'wasm-pack': True}}
+
+
+@pytest.mark.skipif(not shutil.which('npm'), reason='JavaScript builds need npm')
+def test_js_build_dependencies_and_failure(tmp_path):
+    root = tmp_path/'ws'
+    root.mkdir()
+    consumer, bridge, other, library = root/'consumer', root/'tools'/'bridge', root/'other', tmp_path/'library'
+    (root/'package.json').write_text('{"private": true, "workspaces": ["tools/*"]}')
+    (root/'repos-local.txt').write_text('org/library ../library')
+    for d,deps,code in (
+        (consumer, {'bridge': '*'}, "from pathlib import Path; Path('built.txt').write_text(Path('../../library/built.txt').read_text())"),
+        (bridge, {'other': '*', 'library': '*'}, None),
+        (other, {'bridge': '*'}, None),  # A source-ready cycle needs no build tasks.
+        (library, {}, "from pathlib import Path; Path('built.txt').write_text('generated')"),
+    ):
+        d.mkdir(parents=True)
+        data = {'name': d.name, 'version': '0.1.0', 'dependencies': deps}
+        if code:
+            data['scripts'] = {'build': f'"{sys.executable}" build.py'}
+            (d/'build.py').write_text(code)
+        (d/'package.json').write_text(json.dumps(data))
+    packages, graph = core._js_graph(core._npm_dirs(root))
+    assert core._build_js(root, packages, graph, 3) == [library, consumer]
+    assert (consumer/'built.txt').read_text() == 'generated'
+
+    for d in (library, consumer): (d/'built.txt').unlink()
+    (library/'build.py').write_text("raise RuntimeError('broken generator')")
+    with pytest.raises(subprocess.CalledProcessError): core._build_js(root, packages, graph, 3)
+    assert not (consumer/'built.txt').exists()
 
 
 

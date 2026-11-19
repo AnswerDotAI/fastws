@@ -2,15 +2,17 @@
 
 __all__ = ["ws_setup", "ws_clone", "ws_pull", "ws_status", "ws_branches", "ws_build", "ws_sync", "ws_add", "ws_remove", "cargo_develop", "cargo_stage", "cargo_wait", "cargo_setup"]
 
-import ast, fnmatch, glob, hashlib, json, os, re, shlex, shutil, subprocess, sys, time
+import ast, fnmatch, hashlib, json, os, re, shlex, shutil, subprocess, sys, tarfile, time
 from pathlib import Path
 from contextlib import contextmanager
-from concurrent.futures import ThreadPoolExecutor
+from concurrent.futures import FIRST_COMPLETED, ThreadPoolExecutor, wait
+from graphlib import CycleError, TopologicalSorter
+from tempfile import TemporaryDirectory
 
 from fastcore.parallel import parallel_async_gen
 from fastcore.script import call_parse
 from fastgit import Git
-from ghapi.core import dep_key, dep_closure
+from ghapi.core import dep_key
 from packaging.requirements import Requirement
 from packaging.utils import canonicalize_name
 
@@ -538,23 +540,49 @@ def _sdists_by_pkg(out: Path) -> dict[str, list[Path]]:
     for p in out.glob("*.tar.gz"): res.setdefault(_dist_name(p.name.removesuffix(".tar.gz").rsplit("-", 1)[0]), []).append(p)
     return res
 
-def _build_projects(root: Path, repos_file: str, project: str = None) -> list[tuple[str, Path]]:
-    "(name, dir) for every project ws-sync installs: workspace members plus external checkouts"
+def _npm_dists_by_pkg(out: Path) -> dict[str, list[Path]]:
+    "Existing npm tarballs, identified by their package metadata rather than ambiguous filename prefixes."
+    res = {}
+    for p in out.glob('*.tgz'):
+        with tarfile.open(p) as archive: name = json.load(archive.extractfile('package/package.json'))['name']
+        res.setdefault(name, []).append(p)
+    return res
+
+def _build_projects(root: Path, repos_file: str) -> list[tuple[str, Path]]:
+    "(name, dir) for every Python project ws-sync installs: workspace members plus external checkouts."
     repos_path = _resolve_path(root, repos_file)
     entries = _load_repo_entries(repos_path, root)
     ext_dirs = [d for _,d,_ in entries if d.resolve().parent != root.resolve()]
     res = [(name, d) for d in _ws_dirs(root) if (d/"pyproject.toml").exists() and (name := _read_pyproject_name(d/"pyproject.toml"))]
     res += [(n, _resolve_path(root, p)) for n,p in _external_projects(root, ext_dirs)]
-    if project is None: return res
-    graph = {}
-    for name, d in res:
+    return list(dict.fromkeys((name, d.resolve()) for name,d in res))
+
+def _dependency_dirs(start: Path, graph: dict) -> set[Path]:
+    "The starting directory and its transitive local dependencies."
+    seen, todo = set(), [start]
+    while todo:
+        d = todo.pop()
+        if d in seen: continue
+        seen.add(d)
+        todo.extend(graph[d] - seen)
+    return seen
+
+def _build_selection(root: Path, repos_file: str, project: str = None):
+    "Python projects, JS metadata and JS dependency graph for the selected mixed-language closure."
+    py = _build_projects(root, repos_file)
+    packages, js_graph = _js_graph(_npm_dirs(root, repos_file))
+    graph = {d: set(deps) for d,deps in js_graph.items()}
+    names = {_dist_name(n): d for n,d in py}
+    for name, d in py:
         data = tomllib.loads((d/'pyproject.toml').read_text())
         deps = data.get('project', {}).get('dependencies', []) + data.get('build-system', {}).get('requires', [])
-        graph[_dist_name(name)] = (d, [_dist_name(dep_key(dep)) for dep in deps])
-    key = _dist_name(project)
-    if key not in graph: raise SystemExit(f'No workspace project named {project}')
-    dirs = dep_closure(key, graph)
-    return [(n,d) for n,d in res if d in dirs]
+        graph.setdefault(d, set()).update(names[key] for dep in deps if (key := _dist_name(dep_key(dep))) in names)
+    if project is None: return py, packages, js_graph
+    matches = {d for n,d in py if _dist_name(n) == _dist_name(project)} | {d for d,p in packages.items() if p.get('name') == project}
+    if not matches: raise SystemExit(f'No workspace project named {project}')
+    if len(matches) > 1: raise SystemExit(f'Ambiguous workspace project {project}: {", ".join(map(str, sorted(matches)))}')
+    dirs = _dependency_dirs(matches.pop(), graph)
+    return [(n,d) for n,d in py if d in dirs], {d: p for d,p in packages.items() if d in dirs}, {d: deps for d,deps in js_graph.items() if d in dirs}
 
 @contextmanager
 def _cli_errors():
@@ -620,39 +648,62 @@ def cargo_wait(
 @call_parse
 def ws_build(
     workspace: str = "",  # Workspace root; defaults to active venv parent when available
-    out: str = ".dists",  # Output directory for sdists, relative to the workspace root
+    out: str = ".dists",  # Output directory for Python sdists and npm tarballs, relative to the workspace root
     repos_file: str = "repos.txt",  # Repo list, for checkouts outside the workspace root
-    force: bool = False,  # Rebuild every project, ignoring existing sdists
+    force: bool = False,  # Rebuild every selected distribution, ignoring existing artifacts
     workers: int = 16,  # Number of parallel workers
     project: str = None,  # Build only this package and its transitive workspace dependencies
 ):
-    "Build an sdist of each workspace project into `out`, skipping projects unchanged since their last build; superseded versions are pruned. Progress goes to stderr; on success the dists path prints to stdout; exits 1 if any build fails."
+    "Build Python sdists and npm tarballs, preparing generated JS assets first; unchanged artifacts are skipped and superseded versions pruned."
     root = _ws_root(workspace, repos_file)
     out_path = _resolve_path(root, out)
     out_path.mkdir(parents=True, exist_ok=True)
-    projs = _build_projects(root, repos_file, project)
-    existing = _sdists_by_pkg(out_path)
-    def _stale(name, d):
-        cur = existing.get(_dist_name(name))
-        return not cur or _src_mtime(d) > max(p.stat().st_mtime for p in cur)
-    todo = [(n,d) for n,d in projs if force or _stale(n,d)]
+    py, packages, js_graph = _build_selection(root, repos_file, project)
+    artifacts = [('sdist', n, d) for n,d in py] + [('npm', p['name'], d) for d,p in packages.items() if p.get('name') and p.get('version')]
+    existing = {('sdist', n): paths for n,paths in _sdists_by_pkg(out_path).items()}
+    existing.update({('npm', n): paths for n,paths in _npm_dists_by_pkg(out_path).items()})
+    js_closure = {d: _dependency_dirs(d, js_graph)
+        for d,p in packages.items() if p.get('scripts', {}).get('build')}
+    tool = _fastws_cfg(root).get('js', 'npm')
+    lock = root/('bun.lock' if Path(tool).name in ('bun', 'pybun') else 'package-lock.json')
+    def stale():
+        mtimes = {d: _src_mtime(d) for d in set(packages) | {d for _,d in py}}
+        lock_mtime = lock.stat().st_mtime if lock.exists() else 0
+        for d in js_closure: mtimes[d] = max(mtimes[d], lock_mtime)
+        return [(kind, n, d) for kind,n,d in artifacts if force or not (cur := existing.get((kind, _dist_name(n) if kind == 'sdist' else n)))
+            or max(mtimes[p] for p in js_closure.get(d, {d})) > max(p.stat().st_mtime for p in cur)]
+    todo = stale()
+    if todo:
+        try: _build_js(root, packages, js_graph, workers, stdout=sys.stderr)
+        except subprocess.CalledProcessError as e: raise SystemExit(e.returncode) from None
+        todo = stale()
 
-    def bld(nd):
-        n,d = nd
-        res = subprocess.run(["uv", "build", "--sdist", str(d), "-o", str(out_path)], capture_output=True, text=True)
-        return n, res.returncode, (res.stdout or "") + (res.stderr or "")
+    def bld(item):
+        kind,n,d = item
+        with TemporaryDirectory(prefix='.fastws-', dir=out_path) as tmp:
+            if kind == 'sdist': cmd = ['uv', 'build', '--sdist', str(d), '-o', tmp]
+            elif Path(tool).name in ('bun', 'pybun'): cmd = [tool, 'pm', 'pack', '--destination', tmp]
+            else: cmd = [tool, 'pack', '--pack-destination', tmp]
+            res = subprocess.run(cmd, cwd=d, capture_output=True, text=True)
+            dest = None
+            if not res.returncode:
+                artifact, = Path(tmp).glob('*.tar.gz' if kind == 'sdist' else '*.tgz')
+                dest = out_path/artifact.name
+                artifact.replace(dest)
+            return kind, n, dest, res.returncode, (res.stdout or '') + (res.stderr or '')
 
     built = failed = 0
     with ThreadPoolExecutor(max_workers=workers) as ex:
-        for name, code, out_txt in ex.map(bld, todo):
+        for kind, name, dest, code, out_txt in ex.map(bld, todo):
             if code:
                 failed += 1
                 print(f"⚠️  {name}: build failed\n{out_txt}", file=sys.stderr)
                 continue
             built += 1
-            for p in sorted(_sdists_by_pkg(out_path).get(_dist_name(name), []), key=lambda p: p.stat().st_mtime)[:-1]: p.unlink()
+            for p in existing.get((kind, _dist_name(name) if kind == 'sdist' else name), []):
+                if p != dest: p.unlink()
             print(f"✓ {name}", file=sys.stderr)
-    print(f"{built} built, {len(projs)-len(todo)} up to date" + (f", {failed} failed" if failed else ""), file=sys.stderr)
+    print(f"{built} built, {len(artifacts)-len(todo)} up to date" + (f", {failed} failed" if failed else ""), file=sys.stderr)
     if failed: raise SystemExit(1)
     print(out_path)
 def _upgrade_stamp(root: Path) -> Path:
@@ -905,17 +956,29 @@ def _cargo_update(root: Path, workers: int = 16):
             elif lines := [l for l in out.splitlines() if l.lstrip().startswith(("Updating ", "Adding ", "Removing ")) and "crates.io index" not in l]:
                 print(f"{name}:\n" + "\n".join(lines))
 
-def _npm_dirs(root: Path) -> list[Path]:
-    "Find root JavaScript packages and their declared workspace members."
+def _workspace_patterns(data, path):
+    members = data.get("workspaces", [])
+    if not isinstance(members, list): raise SystemExit(f"{path}: fastws requires `workspaces` to be a list of package paths.")
+    return members
+
+def _npm_dirs(root: Path, repos_file="repos.txt") -> list[Path]:
+    "Find root, declared and registered external JavaScript packages and their explicit members."
     exclude = _fastws_cfg(root).get("exclude", [])
-    def ok(d): return not d.name.startswith((".", "_")) and d.name != "node_modules"
+    def ok(d):
+        return (not d.name.startswith((".", "_")) and d.name != "node_modules"
+            and not any(_matches_ws(os.path.relpath(d, root), e) for e in exclude))
+    declared = []
+    for name in ("package.json", "package.json.shared"):
+        path = root/name
+        if path.exists() and "workspaces" in (data := json.loads(path.read_text())): declared = _workspace_patterns(data, path)
+    roots = _project_dirs(root, "package.json", ["*", *declared])
+    roots += [d for _,d,_ in _load_repo_entries(_resolve_path(root, repos_file), root) if (d/"package.json").is_file()]
     res = []
-    for d in _project_dirs(root, "package.json", exclude=exclude):
+    for d in dict.fromkeys(roots):
         if not ok(d): continue
         data = json.loads((d/"package.json").read_text())
-        members = [glob.escape(d.name)] + [f"{glob.escape(d.name)}/{p}" for p in data.get("workspaces", [])]
-        res += _project_dirs(root, "package.json", members, exclude)
-    return list(dict.fromkeys(d for d in res if ok(d)))
+        res += [d] + _project_dirs(d, "package.json", _workspace_patterns(data, d/"package.json"))
+    return list(dict.fromkeys(d.resolve() for d in res if ok(d)))
 
 def _sync_ws_package_json(root: Path, members: list[Path]) -> tuple[list[str], list[str]]:
     "Merge shared settings and update workspaces, preserving external paths and globs; return (added, removed)."
@@ -926,8 +989,7 @@ def _sync_ws_package_json(root: Path, members: list[Path]) -> tuple[list[str], l
     if shared.exists():
         for k,v in json.loads(shared.read_text()).items():
             data[k] = data[k] | v if isinstance(v, dict) and isinstance(data.get(k), dict) else v
-    cur = data.get("workspaces", [])
-    if not isinstance(cur, list): raise SystemExit(f"{path}: fastws requires `workspaces` to be a list of package paths.")
+    cur = _workspace_patterns(data, path)
     kept = [e for e in cur if any(c in e for c in "*?[") or not (root/e).resolve().is_relative_to(root.resolve())]
     new = kept + [e for e in (os.path.relpath(d, root) for d in members) if e not in kept]
     if new != cur: data["workspaces"] = new
@@ -939,6 +1001,14 @@ def _native_js(members: list[Path]) -> list[Path]:
     "JavaScript packages with a Rust manifest and a build script."
     return [d for d in members if (d/"Cargo.toml").exists()
         and json.loads((d/"package.json").read_text()).get("scripts", {}).get("build")]
+
+def _js_graph(members: list[Path]):
+    "Package manifests and local build dependencies, keyed by package directory."
+    packages = {d: json.loads((d/"package.json").read_text()) for d in members}
+    names = {data["name"]: d for d,data in packages.items() if data.get("name")}
+    graph = {d: {names[n] for key in ("dependencies", "devDependencies", "optionalDependencies")
+        for n in data.get(key, {}) if n in names} for d,data in packages.items()}
+    return packages, graph
 
 def _check_rustup():
     "Require rustup's compiler proxies for automatic WASM target installation."
@@ -960,8 +1030,39 @@ def _npm_install(root: Path):
         if e.stdout: print(e.stdout, file=sys.stderr, end="")
         raise
 
+def _build_js(root: Path, packages, graph, build_workers: int, *, stdout=None) -> list[Path]:
+    "Run declared builds dependency-first, including dependencies reached through source-ready packages."
+    builds = {d for d,data in packages.items() if data.get("scripts", {}).get("build")}
+    def prerequisites(d):
+        seen, ready, pending = {d}, set(), list(graph[d])
+        while pending:
+            dep = pending.pop()
+            if dep in seen: continue
+            seen.add(dep)
+            if dep in builds: ready.add(dep)
+            else: pending.extend(graph[dep])
+        return ready
+    # Source-ready cycles need no scheduling; only actual build tasks must be acyclic.
+    order = TopologicalSorter({d: prerequisites(d) for d in packages if d in builds})
+    try: order.prepare()
+    except CycleError as e: raise SystemExit("JavaScript build dependency cycle: " + " -> ".join(str(d) for d in e.args[1])) from None
+    tool = _fastws_cfg(root).get("js", "npm")
+    cmd = [tool, "run", "--silent", "build"] if tool == "npm" else [tool, "run", "build"]
+    built = []
+    with ThreadPoolExecutor(max_workers=build_workers) as ex:
+        pending = {}
+        while order.is_active():
+            for d in order.get_ready(): pending[ex.submit(subprocess.run, cmd, check=True, cwd=d, stdout=stdout)] = d
+            done, _ = wait(pending, return_when=FIRST_COMPLETED)
+            for future in done:
+                future.result()
+                d = pending.pop(future)
+                order.done(d)
+                built.append(d)
+    return built
+
 def _sync_js(root: Path, members: list[Path], build_workers: int) -> list[Path]:
-    "Install the JS workspace, build native members with at most `build_workers` concurrent scripts, and return those members."
+    "Install the JS workspace, then build dependencies before consumers."
     tool = _fastws_cfg(root).get("js", "npm")
     if not shutil.which(tool):
         msg = f"{tool} is not installed: install it, or set [tool.fastws].js to a package manager that is"
@@ -972,11 +1073,7 @@ def _sync_js(root: Path, members: list[Path], build_workers: int) -> list[Path]:
         raise SystemExit(msg)
     if tool == "npm": _npm_install(root)
     else: subprocess.run([tool, "install"], check=True, cwd=root)
-    built = _native_js(members)
-    cmd = [tool, "run", "--silent", "build"] if tool == "npm" else [tool, "run", "build"]
-    with ThreadPoolExecutor(max_workers=build_workers) as ex:
-        list(ex.map(lambda d: subprocess.run(cmd, check=True, cwd=d), built))
-    return built
+    return _build_js(root, *_js_graph(members), build_workers)
 
 @call_parse
 async def ws_sync(
@@ -986,7 +1083,7 @@ async def ws_sync(
     template_file: str = "pyproject.tmpl",  # Template copied when pyproject.toml is missing
     workers: int = 64,  # Number of parallel clone, pull and dependency-update workers
     upgrade: bool = False,  # Force the once-daily dependency upgrade pass
-    build_workers: int = os.cpu_count() or 1,  # Concurrent project builds per native phase; defaults to CPU count
+    build_workers: int = os.cpu_count() or 1,  # Concurrent projects per build phase; defaults to CPU count
 ):
     "Pull the workspace baseline, clone missing shared/local repos, then pull projects and sync; upgrade dependencies daily."
     with _cli_errors():
@@ -1022,7 +1119,7 @@ async def ws_sync(
         if added_p: print(f"Cargo patches added: {', '.join(added_p)}")
         if removed_p: print(f"Cargo patches removed: {', '.join(removed_p)}")
     
-        js_members = _npm_dirs(root)
+        js_members = _npm_dirs(root, repos_file)
         if _native_js(js_members): _check_rustup()
         added_j, removed_j = _sync_ws_package_json(root, js_members)
         if added_j: print(f"JS workspace packages added: {', '.join(added_j)}")
@@ -1090,8 +1187,8 @@ def _resolve_add_target(root: Path, repo: str) -> tuple[str, bool, str|None]:
     d = root/repo
     if not d.is_dir(): return _normalize_repo(repo), False, None  # invalid spec and no such folder: raise the standard error
     parsed = _origin_repo(d)
-    if not (d/"pyproject.toml").exists():
-        raise SystemExit(f"{d.name} has no pyproject.toml: scaffold it first (e.g. `nbdev-new` or `ship-new`), then re-run ws-add")
+    if not any((d/f).exists() for f in ("pyproject.toml", "Cargo.toml", "package.json")):
+        raise SystemExit(f"{d.name} has no pyproject.toml, Cargo.toml or package.json: scaffold the project first, then re-run ws-add")
     return parsed, True, None
 
 def _resolve_removal_target(root: Path, repo: str, repos_path: Path) -> str:
