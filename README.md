@@ -315,9 +315,11 @@ An optional tracked `package.json.shared` is merged into the root `package.json`
 
 Before `uv sync`, fastws regenerates `tool.uv.no-build-isolation-package` with the sorted package names of projects using `fastws.build_backend`, including external checkouts. These builds use the shared environment's `fastws-cli` and `maturin`. Leave global build isolation enabled for other projects.
 
-After `uv sync`, fastws runs `cargo develop` in each mixed Rust/Python project. Cargo skips unchanged compilation inputs. Projects using `fastws.build_backend` should keep only packaging inputs in `tool.uv.cache-keys`; Rust source changes are handled by Cargo. Maturin packages with `bindings = "bin"` keep their existing uv installation path.
+After `uv sync`, fastws runs `cargo develop` in mixed Rust/Python projects, with up to one project per CPU building concurrently by default. Cargo skips unchanged compilation inputs. Projects using `fastws.build_backend` should keep only packaging inputs in `tool.uv.cache-keys`; Rust source changes are handled by Cargo. Maturin packages with `bindings = "bin"` keep their existing uv installation path.
 
-Fastws then runs `<tool> install` at the workspace root. It runs `<tool> run build` in each JavaScript package containing both `Cargo.toml` and a `build` script. Cargo handles incremental compilation. Other build steps still run.
+Fastws then runs `<tool> install` at the workspace root. After installation, it runs `<tool> run build` in JavaScript packages containing both `Cargo.toml` and a `build` script, under the same project-concurrency limit. Cargo handles incremental compilation. Other build steps still run.
+
+`--build-workers` sets the maximum concurrent projects within each of these two build phases, defaulting to the CPU count; `--build-workers 1` runs each phase serially. It is separate from `--workers`, which controls cloning, pulling and dependency updates. Cargo keeps its own within-project parallelism, so increasing project concurrency also increases CPU and memory demand. Cargo may serialize builds that share a target directory.
 
 For npm, sync hides successful install output and build-command banners. Installs use error-only logging, so npm warnings are hidden while errors and failure output remain visible. Run `npm audit` at the workspace root to inspect audit findings. Build scripts retain their own output; configure their tools to suppress routine progress. Other package managers retain their normal output.
 
@@ -333,6 +335,7 @@ Before every uv sync, `ws-sync` writes `.git/fastws-cargo-key` for each member c
 ws-sync
 ws-sync --workspace ~/aai-ws
 ws-sync --upgrade
+ws-sync --build-workers 1
 ```
 
 ### `ws-add`

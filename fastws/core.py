@@ -960,8 +960,8 @@ def _npm_install(root: Path):
         if e.stdout: print(e.stdout, file=sys.stderr, end="")
         raise
 
-def _sync_js(root: Path, members: list[Path]) -> list[Path]:
-    "Install the JS workspace, run every native member's build script, and return those members. Cargo handles incremental compilation."
+def _sync_js(root: Path, members: list[Path], build_workers: int) -> list[Path]:
+    "Install the JS workspace, build native members with at most `build_workers` concurrent scripts, and return those members."
     tool = _fastws_cfg(root).get("js", "npm")
     if not shutil.which(tool):
         msg = f"{tool} is not installed: install it, or set [tool.fastws].js to a package manager that is"
@@ -974,7 +974,8 @@ def _sync_js(root: Path, members: list[Path]) -> list[Path]:
     else: subprocess.run([tool, "install"], check=True, cwd=root)
     built = _native_js(members)
     cmd = [tool, "run", "--silent", "build"] if tool == "npm" else [tool, "run", "build"]
-    for d in built: subprocess.run(cmd, check=True, cwd=d)
+    with ThreadPoolExecutor(max_workers=build_workers) as ex:
+        list(ex.map(lambda d: subprocess.run(cmd, check=True, cwd=d), built))
     return built
 
 @call_parse
@@ -983,8 +984,9 @@ async def ws_sync(
     repos_file: str = "repos.txt",  # Repo list to update from local git remotes
     pyproject_file: str = "pyproject.toml",  # Workspace pyproject to update
     template_file: str = "pyproject.tmpl",  # Template copied when pyproject.toml is missing
-    workers: int = 64,  # Number of parallel workers
+    workers: int = 64,  # Number of parallel clone, pull and dependency-update workers
     upgrade: bool = False,  # Force the once-daily dependency upgrade pass
+    build_workers: int = os.cpu_count() or 1,  # Concurrent project builds per native phase; defaults to CPU count
 ):
     "Pull the workspace baseline, clone missing shared/local repos, then pull projects and sync; upgrade dependencies daily."
     with _cli_errors():
@@ -1034,11 +1036,13 @@ async def ws_sync(
         _sync_cargo_keys(root)
         subprocess.run(["uv", "sync", "-U"] if up else ["uv", "sync"], check=True, cwd=root)
         from .cargo import develop
+        native = []
         for _,d in projects:
             cfg = tomllib.loads((d/'pyproject.toml').read_text()).get('tool', {}).get('maturin', {})
-            if 'python-source' in cfg and cfg.get('bindings') != 'bin': develop(d.resolve())
+            if 'python-source' in cfg and cfg.get('bindings') != 'bin': native.append(d.resolve())
+        with ThreadPoolExecutor(max_workers=build_workers) as ex: list(ex.map(develop, native))
         if up: _upgrade_stamp(root).touch()
-        if js_members: _sync_js(root, js_members)
+        if js_members: _sync_js(root, js_members, build_workers)
 
 @call_parse
 async def ws_add(
