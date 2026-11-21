@@ -1,5 +1,18 @@
 <!-- do not remove -->
 
+## 0.0.37
+
+### New Features
+
+- Switch JS workspaces to Vite+/pnpm, add wasm and nested JS package support, respect excludes on discovery, and disable pytest autoload ([#66](https://github.com/AnswerDotAI/fastws/issues/66))
+- Add npm tarball builds to ws-build, run JS builds in dependency order, and discover registered external and declared nested JS packages ([#65](https://github.com/AnswerDotAI/fastws/issues/65))
+- Build native Rust/Python and JS projects concurrently in ws-sync, add --build-workers option defaulting to CPU count ([#64](https://github.com/AnswerDotAI/fastws/issues/64))
+
+### Bugs Squashed
+
+- ws-sync: cargo update runs after uv sync, so a stale Cargo.lock is unrecoverable ([#16](https://github.com/AnswerDotAI/fastws/issues/16))
+
+
 ## 0.0.36
 
 ### New Features
