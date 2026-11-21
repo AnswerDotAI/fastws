@@ -115,6 +115,7 @@ Clone a workspace repo into a new directory, create its `.venv`, install fastws,
 ws-setup AnswerDotAI/aai-ws ~/aai-ws
 ws-setup AnswerDotAI/private-ws ~/aai-ws
 ws-setup owner/workspace ~/my-workspace --python 3.13
+ws-setup AnswerDotAI/private-ws ~/aai-ws --workers 8
 ```
 
 The destination must not exist, including as an empty directory or a symlink. A failed step stops setup and leaves the checkout in place for inspection; it never deletes a partial workspace automatically. For an existing workspace, activate its environment and use `ws-sync` instead. Workspace repos should include fastws in their repo list or package dependencies so syncing retains the workspace commands.
