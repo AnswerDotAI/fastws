@@ -1,5 +1,12 @@
 <!-- do not remove -->
 
+## 0.0.38
+
+### New Features
+
+- Sync Vite+ toolchain versions into root package.json and pnpm-workspace.yaml overrides ([#67](https://github.com/AnswerDotAI/fastws/issues/67))
+
+
 ## 0.0.37
 
 ### New Features
