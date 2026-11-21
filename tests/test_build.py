@@ -1,5 +1,6 @@
 import json, shutil, subprocess, tarfile, pytest, fastws.core as core
 from fastws.cargo import build, check, run_tests, Suite
+from pathlib import Path
 
 
 def _mk_proj(root, name, extra=''):
@@ -15,21 +16,51 @@ name = "{name}"
 def test_build_dependency_selection(tmp_path):
     root = tmp_path/'ws'
     root.mkdir()
-    app = _mk_proj(root, 'app', r'''dependencies = ["My.Lib>=1"]''')
+    app = _mk_proj(root, 'app', r'''dependencies = ["My.Lib>=1", "unused-wasm"]
+[tool.fastws]
+js-packages = ["frontend"]''')
     _mk_proj(root, 'my-lib', r'''[build-system]
 requires = ["external"]''')
     external = _mk_proj(tmp_path, 'external', r'''dependencies = ["app", "published-only"]''')
+    used_wasm = _mk_proj(root, 'used-wasm', r'''[tool.fastws]
+wasm-package = { name = "used-wasm-js", path = "wasm/pkg" }''')
+    root_wasm = _mk_proj(root, 'root-wasm', r'''[tool.fastws]
+wasm-package = { name = "root-wasm-js", path = "wasm/pkg" }''')
+    (root_wasm/'package.json').write_text('{"name":"root-wasm-js","version":"0.1.0","private":true}')
+    (root_wasm/'wasm'/'pkg').mkdir(parents=True)
+    (root_wasm/'wasm'/'pkg'/'package.json').write_text('{"name":"root-wasm-js","version":"0.1.0"}')
+    (root/'pnpm-workspace.yaml').write_text('packages:\n  - root-wasm/wasm/pkg\n')
+    unused_wasm = _mk_proj(root, 'unused-wasm', r'''[tool.fastws]
+wasm-package = { name = "@example/unused-wasm", path = "wasm/pkg" }''')
     _mk_proj(root, 'unrelated')
     (root/'repos-local.txt').write_text(f'owner/external {external}')
-    (app/'package.json').write_text('{"name":"app", "dependencies":{"@example/assets":"^1"}}')
+    frontend = app/'frontend'
+    frontend.mkdir()
+    (frontend/'package.json').write_text('{"name":"app-fe", "dependencies":{"@example/assets":"^1", "used-wasm-js":">=0.1.0", "root-wasm-js":">=0.1.0"}}')
     assets = root/'tools'/'assets'
     assets.mkdir(parents=True)
     (assets.parent/'package.json').write_text('{"private":true,"workspaces":["assets"]}')
     (assets/'package.json').write_text('{"name":"@example/assets","version":"1.0.0"}')
+    members = core._js_dirs(root)
+    assert root_wasm.resolve() in members and (root_wasm/'wasm/pkg').resolve() not in members
     py, packages, _ = core._build_selection(root, 'repos.txt', 'APP')
-    assert {n for n,d in py} == {'app', 'my-lib', 'external'} and set(packages) == {app, assets}
+    assert {n for n,d in py} == {'app', 'my-lib', 'external', 'unused-wasm', 'root-wasm'}
+    assert set(packages) == {frontend, assets, root_wasm.resolve(), (used_wasm/'wasm/pkg').resolve()}
+    assert (unused_wasm/'wasm/pkg').resolve() not in packages
+    assert set(core._build_selection(root, 'repos.txt', '@example/unused-wasm')[1]) == {(unused_wasm/'wasm/pkg').resolve()}
     assert set(core._build_selection(root, 'repos.txt', '@example/assets')[1]) == {assets}
     with pytest.raises(SystemExit, match='No workspace project'): core._build_selection(root, 'repos.txt', 'missing')
+
+
+def _write_cached_vp_shared(root):
+    vp = Path(shutil.which('vp')).resolve().parent.parent
+    pm = json.loads((vp/'package.json').read_text())['packageManager']
+    node_vers = sorted(p.name for p in (vp.parent/'js_runtime'/'node').iterdir() if p.is_dir())
+    (root/'package.json.shared').write_text(json.dumps({
+        'packageManager': pm,
+        'devEngines': {'runtime': {'name': 'node', 'version': node_vers[-1]}},
+    }))
+
 
 
 def _archive_text(path, suffix):
@@ -38,11 +69,12 @@ def _archive_text(path, suffix):
         return archive.extractfile(name).read().decode()
 
 
+@pytest.mark.skipif(not shutil.which('vp'), reason='JavaScript builds need Vite+ (vp)')
 def test_mixed_distributions(tmp_path, capfd):
     app, styles, out = tmp_path/'app', tmp_path/'styles', tmp_path/'.dists'
     for d in app, styles: d.mkdir()
-    lock = tmp_path/'package-lock.json'
-    lock.write_text('{"lockfileVersion":3,"packages":{"node_modules/theme":{"version":"1.0.0"}}}')
+    lock = tmp_path/'pnpm-lock.yaml'
+    lock.write_text('lockfileVersion: "9.0"\npackages:\n  theme@1.0.0: {}\n')
     (app/'pyproject.toml').write_text(r'''[project]
 name = "office-app"
 version = "0.1.0"
@@ -51,6 +83,8 @@ requires = ["setuptools>=77"]
 build-backend = "setuptools.build_meta"
 [tool.setuptools]
 py-modules = ["office_app"]
+[tool.fastws]
+js-packages = ["frontend"]
 ''')
     (app/'office_app.py').write_text('')
     (app/'MANIFEST.in').write_text('include dist/style.txt')
@@ -63,7 +97,7 @@ console.log('exported styles');
 ''')
     (app/'build.js').write_text(r'''const fs = require('node:fs');
 fs.mkdirSync('dist', {recursive:true});
-const version = JSON.parse(fs.readFileSync('../package-lock.json', 'utf8')).packages['node_modules/theme'].version;
+const version = fs.readFileSync('../pnpm-lock.yaml', 'utf8').match(/theme@([^\s:]+)/)[1];
 fs.writeFileSync('dist/style.txt', fs.readFileSync('../styles/generated.txt', 'utf8') + ':' + version);
 console.log('bundled app');
 ''')
@@ -71,6 +105,12 @@ console.log('bundled app');
     (styles/'package.json').write_text(json.dumps(style_pkg))
     (app/'package.json').write_text(json.dumps({'name':'@example/app', 'version':'0.1.0', 'files':['dist'],
         'dependencies':{'@example/styles':'^0.1.0'}, 'scripts':{'build':'node build.js'}}))
+    (app/'frontend').mkdir()
+    (app/'frontend'/'package.json').write_text(json.dumps({'name':'priv-fe', 'version':'0.0.0', 'private':True,
+        'scripts':{'build': 'node -e "require(\'node:fs\').writeFileSync(\'built.txt\', \'ok\')"'}}))
+    _write_cached_vp_shared(tmp_path)
+    core._sync_ws_pnpm_workspace(tmp_path, core._js_dirs(tmp_path))
+    core._sync_ws_package_json(tmp_path)
     def build(): core.ws_build(workspace=str(tmp_path), project='office-app', workers=2)
     build()
     assert capfd.readouterr().out == f'{out}\n'
@@ -78,6 +118,7 @@ console.log('bundled app');
     app_tgz = out/'example-app-0.1.0.tgz'
     styles_tgz = out/'example-styles-0.1.0.tgz'
     assert _archive_text(sdist, 'dist/style.txt') == _archive_text(app_tgz, 'dist/style.txt') == 'first:1.0.0'
+    assert set(out.glob('*.tgz')) == {app_tgz, styles_tgz} and (app/'frontend'/'built.txt').read_text() == 'ok' 
 
     # A dependency edit invalidates both generated app distributions, even though dist/ is a build output.
     (styles/'source.txt').write_text('second')
@@ -90,13 +131,53 @@ console.log('bundled app');
     build()
     assert before == {p:p.stat().st_mtime_ns for p in out.iterdir()}
 
-    # npm writes its tarball before postpack. A failed attempt must not replace the last successful artifact.
+    # pnpm writes its tarball before postpack. A failed attempt must not replace the last successful artifact.
     style_pkg['scripts']['postpack'] = 'node -e "process.exit(2)"'
     (styles/'package.json').write_text(json.dumps(style_pkg))
     with pytest.raises(SystemExit): build()
     assert styles_tgz.stat().st_mtime_ns == before[styles_tgz]
     assert not list(out.glob('.fastws-*'))
 
+
+@pytest.mark.skipif(not shutil.which('vp'), reason='JavaScript builds need Vite+ (vp)')
+def test_wasm_build_always_runs_cargo_and_packs_dist(tmp_path, monkeypatch):
+    root, out = tmp_path/'ws', tmp_path/'ws'/'.dists'
+    root.mkdir()
+    _write_cached_vp_shared(root)
+    sibling = tmp_path/'rustymath'
+    sibling.mkdir()
+    (sibling/'src.txt').write_text('v1')
+    app = _mk_proj(root, 'app', '[tool.fastws]\njs-packages = ["frontend"]')
+    (app/'frontend').mkdir()
+    (app/'frontend'/'package.json').write_text(json.dumps({'name': 'app-fe', 'private': True, 'dependencies': {'basedpl': '>=0.1.0'}}))
+    bpl = _mk_proj(root, 'basedpl', 'version = "0.1.0"\n[build-system]\nrequires = ["setuptools>=77"]\nbuild-backend = "setuptools.build_meta"\n[tool.setuptools]\npy-modules = []\n[tool.fastws]\nwasm-package = { name = "basedpl", path = "wasm/pkg" }')
+    (bpl/'package.json').write_text(json.dumps({'name': 'basedpl', 'version': '0.1.0', 'private': True}))
+    _mk_proj(root, 'mdhtml', '[tool.fastws]\nwasm-package = { name = "@answerdotai/mdhtml", path = "wasm/pkg" }')
+    core._sync_ws_pnpm_workspace(root, core._js_dirs(root))
+    core._sync_ws_package_json(root)
+
+    built_wasm = []
+    def fake_wasm(repo):
+        built_wasm.append(repo.name)
+        pkg = repo/'wasm'/'pkg'
+        pkg.mkdir(parents=True, exist_ok=True)
+        val = (sibling/'src.txt').read_text()
+        if not (pkg/'out.js').exists() or (pkg/'out.js').read_text() != val:
+            (pkg/'out.js').write_text(val)
+            (pkg/'package.json').write_text(json.dumps({'name': 'basedpl', 'version': '0.1.0', 'files': ['out.js']}))
+    monkeypatch.setattr(core, '_check_rustup', lambda wasm=False: None)
+    monkeypatch.setattr(core, '_build_wasm', fake_wasm)
+
+    core.ws_build(workspace=str(root), project='app-fe', workers=2)
+    assert built_wasm == ['basedpl']
+    tgz, = out.glob('*.tgz')
+    assert tgz.name == 'basedpl-0.1.0.tgz' and _archive_text(tgz, 'out.js') == 'v1'
+
+    # Editing an external sibling crate without touching basedpl still invokes Cargo and repacks updated WASM.
+    (sibling/'src.txt').write_text('v2')
+    core.ws_build(workspace=str(root), project='app-fe', workers=2)
+    assert built_wasm == ['basedpl', 'basedpl']
+    assert _archive_text(out/'basedpl-0.1.0.tgz', 'out.js') == 'v2' 
 
 @pytest.mark.parametrize('body, diagnostic', [('', ''), ('let unused = 1;', 'warning'), ('compile_error!("broken");', 'error')])
 def test_build_diagnostics(tmp_path, capfd, monkeypatch, body, diagnostic):

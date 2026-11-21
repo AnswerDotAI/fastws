@@ -5,8 +5,7 @@ __all__ = ["ws_setup", "ws_clone", "ws_pull", "ws_status", "ws_branches", "ws_bu
 import ast, fnmatch, hashlib, json, os, re, shlex, shutil, subprocess, sys, tarfile, time
 from pathlib import Path
 from contextlib import contextmanager
-from concurrent.futures import FIRST_COMPLETED, ThreadPoolExecutor, wait
-from graphlib import CycleError, TopologicalSorter
+from concurrent.futures import ThreadPoolExecutor
 from tempfile import TemporaryDirectory
 
 from fastcore.parallel import parallel_async_gen
@@ -15,6 +14,7 @@ from fastgit import Git
 from ghapi.core import dep_key
 from packaging.requirements import Requirement
 from packaging.utils import canonicalize_name
+import yaml
 
 from ._toml import tomllib
 
@@ -131,7 +131,8 @@ def _root_git_dirs(root: Path) -> list[Path]:
     return [d for d in sorted(root.iterdir()) if d.is_dir() and not d.name.startswith((".", "_")) and (d/".git").exists()]
 
 async def _discover_ws_repos(root: Path) -> list[str]:
-    dirs = _root_git_dirs(root)
+    exclude = _fastws_cfg(root).get("exclude", [])
+    dirs = [d for d in _root_git_dirs(root) if not any(_matches_ws(d.name, e) for e in exclude)]
     async def origin(d):
         url = await Git(d, sync=False).remote("get-url", "origin", mute_errors=True)
         return _parse_github_repo(url) if url else None
@@ -374,6 +375,13 @@ def _site_packages(root: Path) -> Path|None:
         if candidates: return candidates[0]
     return None
 
+def _write_pytest_pth(root: Path):
+    site = _site_packages(root)
+    if not site: return
+    pth = site / '_fastws_pytest.pth'
+    line = 'import os; os.environ.setdefault("PYTEST_DISABLE_PLUGIN_AUTOLOAD", "1")\n'
+    if not pth.exists() or pth.read_text() != line: pth.write_text(line)
+
 def _write_pyright_config(root: Path):
     site = _site_packages(root)
     if not site:
@@ -570,13 +578,15 @@ def _dependency_dirs(start: Path, graph: dict) -> set[Path]:
 def _build_selection(root: Path, repos_file: str, project: str = None):
     "Python projects, JS metadata and JS dependency graph for the selected mixed-language closure."
     py = _build_projects(root, repos_file)
-    packages, js_graph = _js_graph(_npm_dirs(root, repos_file))
+    wasm_pkgs = _wasm_packages(root, repos_file)
+    packages, js_graph = _js_graph(_js_dirs(root, repos_file), wasm_pkgs)
     graph = {d: set(deps) for d,deps in js_graph.items()}
     names = {_dist_name(n): d for n,d in py}
     for name, d in py:
         data = tomllib.loads((d/'pyproject.toml').read_text())
         deps = data.get('project', {}).get('dependencies', []) + data.get('build-system', {}).get('requires', [])
         graph.setdefault(d, set()).update(names[key] for dep in deps if (key := _dist_name(dep_key(dep))) in names)
+        graph[d].update(j for j in _js_package_specs(d) if j in packages)
     if project is None: return py, packages, js_graph
     matches = {d for n,d in py if _dist_name(n) == _dist_name(project)} | {d for d,p in packages.items() if p.get('name') == project}
     if not matches: raise SystemExit(f'No workspace project named {project}')
@@ -658,33 +668,62 @@ def ws_build(
     root = _ws_root(workspace, repos_file)
     out_path = _resolve_path(root, out)
     out_path.mkdir(parents=True, exist_ok=True)
+    wasm_pkgs = _wasm_packages(root, repos_file)
     py, packages, js_graph = _build_selection(root, repos_file, project)
-    artifacts = [('sdist', n, d) for n,d in py] + [('npm', p['name'], d) for d,p in packages.items() if p.get('name') and p.get('version')]
+    selected_wasm = {repo: (name, pkg_dir) for repo, (name, pkg_dir) in wasm_pkgs.items()
+        if pkg_dir in packages or (repo in packages and packages[repo].get('name') == name)}
+    wasm_owner = {pkg_dir: repo for repo, (_, pkg_dir) in selected_wasm.items()}
     existing = {('sdist', n): paths for n,paths in _sdists_by_pkg(out_path).items()}
     existing.update({('npm', n): paths for n,paths in _npm_dists_by_pkg(out_path).items()})
+    if selected_wasm:
+        _check_rustup(wasm=True)
+        from .cargo import develop
+        try:
+            native_wasm = [repo for repo in selected_wasm if _is_maturin_native(repo)]
+            if native_wasm:
+                with ThreadPoolExecutor(max_workers=workers) as ex: list(ex.map(develop, native_wasm))
+            with ThreadPoolExecutor(max_workers=workers) as ex: list(ex.map(_build_wasm, selected_wasm))
+        except subprocess.CalledProcessError as e: raise SystemExit(e.returncode) from None
+    wasm_dists = {}
+    for repo, (_, pkg_dir) in selected_wasm.items():
+        meta = json.loads((pkg_dir/'package.json').read_text())
+        if pkg_dir in packages: packages[pkg_dir] = meta
+        else: wasm_dists[pkg_dir] = meta
+    artifacts = [('sdist', n, d) for n,d in py]
+    artifacts += [('npm', p['name'], d) for d,p in packages.items() if p.get('name') and p.get('version') and not p.get('private')]
+    artifacts += [('npm', p['name'], d) for d,p in wasm_dists.items() if p.get('name') and p.get('version') and not p.get('private')]
     js_closure = {d: _dependency_dirs(d, js_graph)
         for d,p in packages.items() if p.get('scripts', {}).get('build')}
-    tool = _fastws_cfg(root).get('js', 'npm')
-    lock = root/('bun.lock' if Path(tool).name in ('bun', 'pybun') else 'package-lock.json')
+    for _, d in py:
+        if nested := [j for j in _js_package_specs(d) if j in js_closure]: js_closure[d] = {d}.union(*(js_closure[j] for j in nested))
+    lock = root/'pnpm-lock.yaml'
+    def _dir_mtime(d):
+        t = _src_mtime(d) if d.exists() else 0
+        if d in wasm_owner: t = max(t, _src_mtime(wasm_owner[d]))
+        if d in selected_wasm and selected_wasm[d][1].exists(): t = max(t, _src_mtime(selected_wasm[d][1]))
+        return t
     def stale():
-        mtimes = {d: _src_mtime(d) for d in set(packages) | {d for _,d in py}}
+        mtimes = {d: _dir_mtime(d) for d in set(packages) | set(wasm_dists) | {d for _,d in py}}
         lock_mtime = lock.stat().st_mtime if lock.exists() else 0
         for d in js_closure: mtimes[d] = max(mtimes[d], lock_mtime)
         return [(kind, n, d) for kind,n,d in artifacts if force or not (cur := existing.get((kind, _dist_name(n) if kind == 'sdist' else n)))
             or max(mtimes[p] for p in js_closure.get(d, {d})) > max(p.stat().st_mtime for p in cur)]
     todo = stale()
     if todo:
-        try: _build_js(root, packages, js_graph, workers, stdout=sys.stderr)
-        except subprocess.CalledProcessError as e: raise SystemExit(e.returncode) from None
-        todo = stale()
+        build_dirs = [d for d,p in packages.items() if p.get('scripts', {}).get('build')]
+        if build_dirs:
+            _check_vp()
+            try: _build_js(root, workers, dirs=build_dirs if project else None)
+            except subprocess.CalledProcessError as e: raise SystemExit(e.returncode) from None
+            todo = stale()
+    if any(kind == 'npm' for kind, _, _ in todo): _check_vp()
 
     def bld(item):
         kind,n,d = item
         with TemporaryDirectory(prefix='.fastws-', dir=out_path) as tmp:
-            if kind == 'sdist': cmd = ['uv', 'build', '--sdist', str(d), '-o', tmp]
-            elif Path(tool).name in ('bun', 'pybun'): cmd = [tool, 'pm', 'pack', '--destination', tmp]
-            else: cmd = [tool, 'pack', '--pack-destination', tmp]
-            res = subprocess.run(cmd, cwd=d, capture_output=True, text=True)
+            if kind == 'sdist': cmd, cwd = ['uv', 'build', '--sdist', str(d), '-o', tmp], d
+            else: cmd, cwd = ['vp', 'pm', 'pack', '--pack-destination', tmp, '--', '--dir', str(d)], root
+            res = subprocess.run(cmd, cwd=cwd, capture_output=True, text=True)
             dest = None
             if not res.returncode:
                 artifact, = Path(tmp).glob('*.tar.gz' if kind == 'sdist' else '*.tgz')
@@ -961,119 +1000,181 @@ def _workspace_patterns(data, path):
     if not isinstance(members, list): raise SystemExit(f"{path}: fastws requires `workspaces` to be a list of package paths.")
     return members
 
-def _npm_dirs(root: Path, repos_file="repos.txt") -> list[Path]:
-    "Find root, declared and registered external JavaScript packages and their explicit members."
+def _yaml_load(path: Path) -> dict:
+    data = yaml.safe_load(path.read_text()) or {}
+    if not isinstance(data, dict): raise SystemExit(f"{path}: expected a YAML mapping.")
+    return data
+
+def _merge_shared(data: dict, shared: dict) -> dict:
+    for k,v in shared.items(): data[k] = data[k] | v if isinstance(v, dict) and isinstance(data.get(k), dict) else v
+    return data
+
+def _rel_ws_path(root: Path, d: Path) -> str: return Path(os.path.relpath(d.resolve(), root.resolve())).as_posix()
+
+def _is_maturin_native(d: Path) -> bool:
+    if not (d/'pyproject.toml').exists(): return False
+    cfg = tomllib.loads((d/'pyproject.toml').read_text()).get('tool', {}).get('maturin', {})
+    return 'python-source' in cfg and cfg.get('bindings') != 'bin'
+
+def _repo_roots(root: Path, repos_file="repos.txt") -> list[Path]:
+    "Candidate top-level workspace directories plus registered external checkouts."
+    exclude = _fastws_cfg(root).get("exclude", [])
+    dirs = _project_dirs(root, exclude=exclude)
+    dirs += [d for _,d,_ in _load_repo_entries(_resolve_path(root, repos_file), root) if d.is_dir()]
+    return list(dict.fromkeys(d.resolve() for d in dirs if not d.name.startswith((".", "_")) and d.name != "node_modules"))
+
+def _wasm_package_spec(d: Path) -> tuple[str, Path] | None:
+    "Static `(npm_name, output_dir)` from `[tool.fastws].wasm-package`, or None."
+    spec = _fastws_cfg(d).get("wasm-package")
+    if spec is None: return None
+    if not isinstance(spec, dict) or not isinstance(spec.get("name"), str) or not spec["name"] or not isinstance(spec.get("path"), str) or not spec["path"]:
+        raise SystemExit(f"{d/'pyproject.toml'}: `[tool.fastws].wasm-package` requires non-empty `name` and `path` strings.")
+    return spec["name"], (d/spec["path"]).resolve()
+
+def _wasm_packages(root: Path, repos_file="repos.txt") -> dict:
+    "`{repo_dir: (npm_name, pkg_dir)}` for repos declaring `[tool.fastws].wasm-package`."
+    return {d: spec for d in _repo_roots(root, repos_file) if (spec := _wasm_package_spec(d))}
+
+def _js_package_specs(d: Path) -> list[Path]:
+    "Explicit nested JS package dirs from `[tool.fastws].js-packages`."
+    specs = _fastws_cfg(d).get("js-packages", [])
+    if not isinstance(specs, list) or not all(isinstance(s, str) and s for s in specs):
+        raise SystemExit(f"{d/'pyproject.toml'}: `[tool.fastws].js-packages` must be a list of package paths.")
+    return [(d/s).resolve() for s in specs if (d/s/"package.json").is_file()]
+
+def _pnpm_patterns(root: Path) -> list[str]:
+    declared = []
+    for name in ("pnpm-workspace.yaml", "pnpm-workspace.shared.yaml"):
+        path = root/name
+        if path.exists() and isinstance(pkgs := _yaml_load(path).get("packages"), list): declared = pkgs
+    return declared
+
+def _js_dirs(root: Path, repos_file="repos.txt") -> list[Path]:
+    "Find root, nested `[tool.fastws].js-packages`, generated `[tool.fastws].wasm-package` and registered external JS packages."
     exclude = _fastws_cfg(root).get("exclude", [])
     def ok(d):
         return (not d.name.startswith((".", "_")) and d.name != "node_modules"
-            and not any(_matches_ws(os.path.relpath(d, root), e) for e in exclude))
-    declared = []
-    for name in ("package.json", "package.json.shared"):
-        path = root/name
-        if path.exists() and "workspaces" in (data := json.loads(path.read_text())): declared = _workspace_patterns(data, path)
-    roots = _project_dirs(root, "package.json", ["*", *declared])
-    roots += [d for _,d,_ in _load_repo_entries(_resolve_path(root, repos_file), root) if (d/"package.json").is_file()]
+            and not any(_matches_ws(_rel_ws_path(root, d), e) for e in exclude))
+    roots = _project_dirs(root, "package.json", ["*", *_pnpm_patterns(root)])
+    repo_roots = _repo_roots(root, repos_file)
+    roots += [d for d in repo_roots if (d/"package.json").is_file()]
     res = []
     for d in dict.fromkeys(roots):
         if not ok(d): continue
         data = json.loads((d/"package.json").read_text())
         res += [d] + _project_dirs(d, "package.json", _workspace_patterns(data, d/"package.json"))
-    return list(dict.fromkeys(d.resolve() for d in res if ok(d)))
+    superseded_wasm = set()
+    for d in repo_roots:
+        if not ok(d) or not (d/"pyproject.toml").is_file(): continue
+        res += _js_package_specs(d)
+        if spec := _wasm_package_spec(d):
+            root_name = json.loads((d/"package.json").read_text()).get("name") if (d/"package.json").is_file() else None
+            if root_name == spec[0]: superseded_wasm.add(spec[1])
+            else: res.append(spec[1])
+    return list(dict.fromkeys(d.resolve() for d in res if ok(d) and d.resolve() not in superseded_wasm))
 
-def _sync_ws_package_json(root: Path, members: list[Path]) -> tuple[list[str], list[str]]:
-    "Merge shared settings and update workspaces, preserving external paths and globs; return (added, removed)."
-    path = root/"package.json"
-    data = json.loads(path.read_text()) if path.exists() else {"private": True}
-    before = json.dumps(data)
-    shared = root/"package.json.shared"
-    if shared.exists():
-        for k,v in json.loads(shared.read_text()).items():
-            data[k] = data[k] | v if isinstance(v, dict) and isinstance(data.get(k), dict) else v
-    cur = _workspace_patterns(data, path)
-    kept = [e for e in cur if any(c in e for c in "*?[") or not (root/e).resolve().is_relative_to(root.resolve())]
-    new = kept + [e for e in (os.path.relpath(d, root) for d in members) if e not in kept]
-    if new != cur: data["workspaces"] = new
-    if json.dumps(data) == before: return [], []
-    path.write_text(json.dumps(data, indent=2) + "\n")
+def _sync_ws_pnpm_workspace(root: Path, members: list[Path]) -> tuple[list[str], list[str]]:
+    "Generate/update `pnpm-workspace.yaml`, merging `pnpm-workspace.shared.yaml`; return `(added, removed)` packages."
+    path = root/"pnpm-workspace.yaml"
+    before = path.read_text() if path.exists() else ""
+    data = _yaml_load(path) if path.exists() else {}
+    cur = list(data.get("packages") or [])
+    data.setdefault("linkWorkspacePackages", "deep")
+    data.setdefault("preferWorkspacePackages", True)
+    data.setdefault("minimumReleaseAge", 1440)
+    shared = root/"pnpm-workspace.shared.yaml"
+    if shared.exists(): _merge_shared(data, _yaml_load(shared))
+    cur_after = list(data.get("packages") or [])
+    kept = [e for e in cur_after if any(c in e for c in "*?[") or not (root/e).resolve().is_relative_to(root.resolve())]
+    new = kept + [e for e in (_rel_ws_path(root, d) for d in members) if e not in kept]
+    data["packages"] = new
+    rendered = yaml.safe_dump(data, sort_keys=False)
+    if rendered == before: return [], []
+    path.write_text(rendered)
     return _entry_changes(cur, new)
 
-def _native_js(members: list[Path]) -> list[Path]:
-    "JavaScript packages with a Rust manifest and a build script."
-    return [d for d in members if (d/"Cargo.toml").exists()
-        and json.loads((d/"package.json").read_text()).get("scripts", {}).get("build")]
+def _sync_ws_package_json(root: Path) -> bool:
+    "Maintain root `package.json`, merging optional `package.json.shared`."
+    path = root/"package.json"
+    data = json.loads(path.read_text()) if path.exists() else {}
+    before = json.dumps(data)
+    data["private"] = True
+    data.pop("workspaces", None)
+    shared = root/"package.json.shared"
+    if shared.exists(): _merge_shared(data, json.loads(shared.read_text()))
+    if json.dumps(data) == before: return False
+    path.write_text(json.dumps(data, indent=2) + "\n")
+    return True
 
-def _js_graph(members: list[Path]):
+def _js_graph(members: list[Path], wasm_pkgs: dict = None):
     "Package manifests and local build dependencies, keyed by package directory."
-    packages = {d: json.loads((d/"package.json").read_text()) for d in members}
+    wasm_by_dir = {pkg_dir: name for name, pkg_dir in (wasm_pkgs or {}).values()}
+    packages = {}
+    for d in members:
+        if (d/"package.json").is_file(): packages[d] = json.loads((d/"package.json").read_text())
+        elif d in wasm_by_dir: packages[d] = {"name": wasm_by_dir[d]}
     names = {data["name"]: d for d,data in packages.items() if data.get("name")}
     graph = {d: {names[n] for key in ("dependencies", "devDependencies", "optionalDependencies")
         for n in data.get(key, {}) if n in names} for d,data in packages.items()}
     return packages, graph
 
-def _check_rustup():
-    "Require rustup's compiler proxies for automatic WASM target installation."
+def _check_rustup(wasm: bool = False):
+    "Require rustup's compiler proxies, and optionally the `wasm32-unknown-unknown` target."
     if not (rustup := shutil.which("rustup")):
-        raise SystemExit("Rust-backed JavaScript builds require rustup. Install it from https://rustup.rs, "
+        raise SystemExit("Rust-backed WebAssembly builds require rustup. Install it from https://rustup.rs, "
             "select a stable toolchain with `rustup default stable`, then reopen your shell and rerun ws-sync.")
     for tool in "rustc","cargo":
         path = shutil.which(tool)
         if path and os.path.samefile(path, rustup): continue
-        raise SystemExit(f"Rust-backed JavaScript builds require rustup-managed Rust, but {tool} resolves to {path or 'nothing'}. "
+        raise SystemExit(f"Rust-backed WebAssembly builds require rustup-managed Rust, but {tool} resolves to {path or 'nothing'}. "
             "Put rustup's bin directory first on PATH after Homebrew or other toolchain setup in your shell profile "
             '(normally: export PATH="$HOME/.cargo/bin:$PATH"; use $CARGO_HOME/bin when customized). '
             "Homebrew Rust can remain installed. Open a new shell and rerun ws-sync.")
+    if wasm:
+        installed = subprocess.run([rustup, "target", "list", "--installed"], capture_output=True, text=True, check=True).stdout.splitlines()
+        if "wasm32-unknown-unknown" not in installed:
+            raise SystemExit("WebAssembly builds require the wasm32-unknown-unknown Rust target. "
+                "Install it with: rustup target add wasm32-unknown-unknown")
 
-def _npm_install(root: Path):
-    "Hide successful npm install output and warnings, but retain errors and failure diagnostics."
-    try: subprocess.run(["npm", "install", "--loglevel=error"], check=True, cwd=root, stdout=subprocess.PIPE, text=True)
+def _check_vp():
+    "Require Vite+ (`vp`) and its managed `node` and `pnpm` shims on PATH."
+    if not (vp := shutil.which("vp")):
+        raise SystemExit("JavaScript workspaces require Vite+ (vp). Install it from https://viteplus.dev "
+            "(`curl -fsSL https://vite.plus | bash`), enable managed Node.js and package-manager shims when prompted, "
+            "then reopen your shell and rerun ws-sync.")
+    for tool in "node", "pnpm":
+        path = shutil.which(tool)
+        if path and os.path.samefile(path, vp): continue
+        raise SystemExit(f"JavaScript workspaces require Vite+-managed {tool}, but {tool} resolves to {path or 'nothing'}. "
+            "Enable Vite+ managed mode (`vp env on`) and put Vite+'s bin directory first on PATH "
+            "(normally via `~/.config/vite-plus/env`), then open a new shell and rerun ws-sync.")
+
+def _build_wasm(repo: Path):
+    "Run `cargo wasm` in `repo` through the workspace's configured Cargo."
+    from .cargo import _cargo_command
+    cmd, env = _cargo_command("wasm")
+    subprocess.run(cmd, cwd=repo, env=env, check=True)
+
+def _run_quiet(cmd: list[str], cwd: Path):
+    "Run `cmd`, hiding routine output on success and printing captured output to stderr on failure."
+    try: subprocess.run(cmd, check=True, cwd=cwd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
     except subprocess.CalledProcessError as e:
         if e.stdout: print(e.stdout, file=sys.stderr, end="")
         raise
 
-def _build_js(root: Path, packages, graph, build_workers: int, *, stdout=None) -> list[Path]:
-    "Run declared builds dependency-first, including dependencies reached through source-ready packages."
-    builds = {d for d,data in packages.items() if data.get("scripts", {}).get("build")}
-    def prerequisites(d):
-        seen, ready, pending = {d}, set(), list(graph[d])
-        while pending:
-            dep = pending.pop()
-            if dep in seen: continue
-            seen.add(dep)
-            if dep in builds: ready.add(dep)
-            else: pending.extend(graph[dep])
-        return ready
-    # Source-ready cycles need no scheduling; only actual build tasks must be acyclic.
-    order = TopologicalSorter({d: prerequisites(d) for d in packages if d in builds})
-    try: order.prepare()
-    except CycleError as e: raise SystemExit("JavaScript build dependency cycle: " + " -> ".join(str(d) for d in e.args[1])) from None
-    tool = _fastws_cfg(root).get("js", "npm")
-    cmd = [tool, "run", "--silent", "build"] if tool == "npm" else [tool, "run", "build"]
-    built = []
-    with ThreadPoolExecutor(max_workers=build_workers) as ex:
-        pending = {}
-        while order.is_active():
-            for d in order.get_ready(): pending[ex.submit(subprocess.run, cmd, check=True, cwd=d, stdout=stdout)] = d
-            done, _ = wait(pending, return_when=FIRST_COMPLETED)
-            for future in done:
-                future.result()
-                d = pending.pop(future)
-                order.done(d)
-                built.append(d)
-    return built
+def _build_js(root: Path, build_workers: int, *, dirs: list[Path] = None):
+    "Run workspace JavaScript `build` scripts in topological order via pnpm."
+    if dirs is not None:
+        if not dirs: return
+        filters = [arg for d in dirs for arg in ("--filter", f"{{{_rel_ws_path(root, d)}}}...")]
+        cmd = ["pnpm", *filters, "--if-present", f"--workspace-concurrency={build_workers}", "run", "build"]
+    else: cmd = ["pnpm", "-r", "--if-present", f"--workspace-concurrency={build_workers}", "run", "build"]
+    _run_quiet(cmd, root)
 
-def _sync_js(root: Path, members: list[Path], build_workers: int) -> list[Path]:
-    "Install the JS workspace, then build dependencies before consumers."
-    tool = _fastws_cfg(root).get("js", "npm")
-    if not shutil.which(tool):
-        msg = f"{tool} is not installed: install it, or set [tool.fastws].js to a package manager that is"
-        if tool == "npm": msg += ("\n\nInstall Node.js and npm using nvm:\n"
-            "curl -fsSL https://raw.githubusercontent.com/nvm-sh/nvm/master/install.sh | bash\n"
-            "# Restart your terminal, then:\n"
-            "nvm install --lts")
-        raise SystemExit(msg)
-    if tool == "npm": _npm_install(root)
-    else: subprocess.run([tool, "install"], check=True, cwd=root)
-    return _build_js(root, *_js_graph(members), build_workers)
+def _sync_js(root: Path, build_workers: int):
+    "Install the workspace with Vite+ and run topological JavaScript builds."
+    _run_quiet(["vp", "install", "--silent"], root)
+    _build_js(root, build_workers)
 
 @call_parse
 async def ws_sync(
@@ -1119,12 +1220,16 @@ async def ws_sync(
         if added_p: print(f"Cargo patches added: {', '.join(added_p)}")
         if removed_p: print(f"Cargo patches removed: {', '.join(removed_p)}")
     
-        js_members = _npm_dirs(root, repos_file)
-        if _native_js(js_members): _check_rustup()
-        added_j, removed_j = _sync_ws_package_json(root, js_members)
-        if added_j: print(f"JS workspace packages added: {', '.join(added_j)}")
-        if removed_j: print(f"JS workspace packages removed: {', '.join(removed_j)}")
-    
+        wasm_pkgs = _wasm_packages(root, repos_file)
+        js_members = _js_dirs(root, repos_file)
+        if wasm_pkgs: _check_rustup(wasm=True)
+        if js_members: _check_vp()
+        if js_members or any((root/f).exists() for f in ("pnpm-workspace.yaml", "pnpm-workspace.shared.yaml", "package.json.shared")):
+            added_j, removed_j = _sync_ws_pnpm_workspace(root, js_members)
+            _sync_ws_package_json(root)
+            if added_j: print(f"JS workspace packages added: {', '.join(added_j)}")
+            if removed_j: print(f"JS workspace packages removed: {', '.join(removed_j)}")
+
         if bad := _pending_dirs(root):
             print(f"⚠️  Skipping uv sync, not Python projects yet (scaffold with e.g. nbdev-new or ship-new, or remove): {', '.join(bad)}")
             return
@@ -1132,14 +1237,14 @@ async def ws_sync(
         if up: _cargo_update(root, workers=workers)
         _sync_cargo_keys(root)
         subprocess.run(["uv", "sync", "-U"] if up else ["uv", "sync"], check=True, cwd=root)
+        _write_pytest_pth(root)
         from .cargo import develop
-        native = []
-        for _,d in projects:
-            cfg = tomllib.loads((d/'pyproject.toml').read_text()).get('tool', {}).get('maturin', {})
-            if 'python-source' in cfg and cfg.get('bindings') != 'bin': native.append(d.resolve())
+        native = [d.resolve() for _,d in projects if _is_maturin_native(d)]
         with ThreadPoolExecutor(max_workers=build_workers) as ex: list(ex.map(develop, native))
+        if wasm_pkgs:
+            with ThreadPoolExecutor(max_workers=build_workers) as ex: list(ex.map(_build_wasm, wasm_pkgs))
         if up: _upgrade_stamp(root).touch()
-        if js_members: _sync_js(root, js_members, build_workers)
+        if js_members: _sync_js(root, build_workers)
 
 @call_parse
 async def ws_add(
