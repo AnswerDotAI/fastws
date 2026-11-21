@@ -1076,8 +1076,8 @@ def _js_dirs(root: Path, repos_file="repos.txt") -> list[Path]:
             else: res.append(spec[1])
     return list(dict.fromkeys(d.resolve() for d in res if ok(d) and d.resolve() not in superseded_wasm))
 
-def _sync_ws_pnpm_workspace(root: Path, members: list[Path]) -> tuple[list[str], list[str]]:
-    "Generate/update `pnpm-workspace.yaml`, merging `pnpm-workspace.shared.yaml`; return `(added, removed)` packages."
+def _sync_ws_pnpm_workspace(root: Path, members: list[Path], toolchain: dict[str, str] = None) -> tuple[list[str], list[str]]:
+    "Generate/update `pnpm-workspace.yaml`, applying Vite+ toolchain overrides and merging `pnpm-workspace.shared.yaml`; return `(added, removed)` packages."
     path = root/"pnpm-workspace.yaml"
     before = path.read_text() if path.exists() else ""
     data = _yaml_load(path) if path.exists() else {}
@@ -1086,7 +1086,20 @@ def _sync_ws_pnpm_workspace(root: Path, members: list[Path]) -> tuple[list[str],
     data.setdefault("preferWorkspacePackages", True)
     data.setdefault("minimumReleaseAge", 1440)
     shared = root/"pnpm-workspace.shared.yaml"
-    if shared.exists(): _merge_shared(data, _yaml_load(shared))
+    shared_data = _yaml_load(shared) if shared.exists() else {}
+    shared_ov = shared_data.get("overrides") if isinstance(shared_data.get("overrides"), dict) else {}
+    if toolchain:
+        ov = dict(data.get("overrides") or {})
+        if core_v := toolchain.get("vite-plus-core"):
+            ov.pop("vite", None)
+            if "vite" not in shared_ov: ov["vite@*"] = f"npm:@voidzero-dev/vite-plus-core@{core_v}"
+            else: ov.pop("vite@*", None)
+        if vitest_v := toolchain.get("vitest"):
+            ov.pop("vitest", None)
+            if "vitest" not in shared_ov: ov["vitest@*"] = vitest_v
+            else: ov.pop("vitest@*", None)
+        if ov: data["overrides"] = ov
+    if shared_data: _merge_shared(data, shared_data)
     cur_after = list(data.get("packages") or [])
     kept = [e for e in cur_after if any(c in e for c in "*?[") or not (root/e).resolve().is_relative_to(root.resolve())]
     new = kept + [e for e in (_rel_ws_path(root, d) for d in members) if e not in kept]
@@ -1096,13 +1109,15 @@ def _sync_ws_pnpm_workspace(root: Path, members: list[Path]) -> tuple[list[str],
     path.write_text(rendered)
     return _entry_changes(cur, new)
 
-def _sync_ws_package_json(root: Path) -> bool:
-    "Maintain root `package.json`, merging optional `package.json.shared`."
+def _sync_ws_package_json(root: Path, toolchain: dict[str, str] = None) -> bool:
+    "Maintain root `package.json`, applying the global `vite-plus` version and merging optional `package.json.shared`."
     path = root/"package.json"
     data = json.loads(path.read_text()) if path.exists() else {}
     before = json.dumps(data)
     data["private"] = True
     data.pop("workspaces", None)
+    if toolchain and (vp_v := toolchain.get("vite-plus")):
+        data["devDependencies"] = {**data.get("devDependencies", {}), "vite-plus": vp_v}
     shared = root/"package.json.shared"
     if shared.exists(): _merge_shared(data, json.loads(shared.read_text()))
     if json.dumps(data) == before: return False
@@ -1151,6 +1166,12 @@ def _check_vp():
         raise SystemExit(f"JavaScript workspaces require Vite+-managed {tool}, but {tool} resolves to {path or 'nothing'}. "
             "Enable Vite+ managed mode (`vp env on`) and put Vite+'s bin directory first on PATH "
             "(normally via `~/.config/vite-plus/env`), then open a new shell and rerun ws-sync.")
+
+def _vp_toolchain() -> dict[str, str]:
+    "Versions of `vite-plus`, `vite-plus-core`, and `vitest` from the global `vp` CLI."
+    if not shutil.which("vp"): return {}
+    raw = subprocess.run(["vp", "toolchain", "--json", "-g"], capture_output=True, text=True, check=True).stdout
+    return {n["id"]: n["version"] for n in json.loads(raw).get("nodes", []) if "id" in n and "version" in n}
 
 def _build_wasm(repo: Path):
     "Run `cargo wasm` in `repo` through the workspace's configured Cargo."
@@ -1228,8 +1249,9 @@ async def ws_sync(
         if wasm_pkgs: _check_rustup(wasm=True)
         if js_members: _check_vp()
         if js_members or any((root/f).exists() for f in ("pnpm-workspace.yaml", "pnpm-workspace.shared.yaml", "package.json.shared")):
-            added_j, removed_j = _sync_ws_pnpm_workspace(root, js_members)
-            _sync_ws_package_json(root)
+            tc = _vp_toolchain() if js_members else {}
+            added_j, removed_j = _sync_ws_pnpm_workspace(root, js_members, toolchain=tc)
+            _sync_ws_package_json(root, toolchain=tc)
             if added_j: print(f"JS workspace packages added: {', '.join(added_j)}")
             if removed_j: print(f"JS workspace packages removed: {', '.join(removed_j)}")
 

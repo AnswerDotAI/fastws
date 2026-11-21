@@ -209,16 +209,24 @@ def test_sync_ws_pnpm_workspace_and_package_json(tmp_path):
     assert data['linkWorkspacePackages'] == 'deep' and data['preferWorkspacePackages'] is True and data['minimumReleaseAge'] == 1440
     assert 'overrides' not in data
 
-    ws.write_text(ws.read_text() + 'overrides:\n  keep: 1.0.0\n')
+    ws.write_text(ws.read_text() + 'overrides:\n  keep: 1.0.0\n  vite: npm:@voidzero-dev/vite-plus-core@8.0.0\n  vitest: 4.0.0\n')
+    tc = {'vite-plus': '1.8.0', 'vite-plus-core': '8.4.0', 'vitest': '5.2.0'}
+    core._sync_ws_pnpm_workspace(tmp_path, [tmp_path/'app'], toolchain=tc)
+    assert core._yaml_load(ws)['overrides'] == {'keep': '1.0.0', 'vite@*': 'npm:@voidzero-dev/vite-plus-core@8.4.0', 'vitest@*': '5.2.0'}
+
     ws_shared.write_text('allowBuilds:\n  esbuild: true\noverrides:\n  vite: npm:@voidzero-dev/vite-plus-core@8.3.8000\n  vitest: 5.1.0\n')
-    core._sync_ws_pnpm_workspace(tmp_path, [tmp_path/'app'])
+    core._sync_ws_pnpm_workspace(tmp_path, [tmp_path/'app'], toolchain=tc)
     assert core._yaml_load(ws)['overrides'] == {'keep': '1.0.0', 'vite': 'npm:@voidzero-dev/vite-plus-core@8.3.8000', 'vitest': '5.1.0'}
 
     pkg, pkg_shared = tmp_path/'package.json', tmp_path/'package.json.shared'
     pkg.write_text(json.dumps({'name': 'local', 'workspaces': ['stale'], 'devDependencies': {'keep': '1'}}))
-    pkg_shared.write_text(json.dumps({'packageManager': 'pnpm@10.34.9', 'devDependencies': {'vite-plus': '1.7.0'}}))
-    assert core._sync_ws_package_json(tmp_path) is True
+    pkg_shared.write_text(json.dumps({'packageManager': 'pnpm@10.34.9'}))
+    assert core._sync_ws_package_json(tmp_path, toolchain=tc) is True
     out = json.loads(pkg.read_text())
     assert 'workspaces' not in out and out['private'] is True
-    assert out['devDependencies'] == {'keep': '1', 'vite-plus': '1.7.0'}
-    assert out['packageManager'] == 'pnpm@10.34.9' 
+    assert out['devDependencies'] == {'keep': '1', 'vite-plus': '1.8.0'}
+    assert out['packageManager'] == 'pnpm@10.34.9'
+
+    pkg_shared.write_text(json.dumps({'packageManager': 'pnpm@10.34.9', 'devDependencies': {'vite-plus': '1.7.0'}}))
+    assert core._sync_ws_package_json(tmp_path, toolchain=tc) is True
+    assert json.loads(pkg.read_text())['devDependencies'] == {'keep': '1', 'vite-plus': '1.7.0'}
