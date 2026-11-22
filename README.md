@@ -336,13 +336,15 @@ Before `uv sync`, fastws regenerates `tool.uv.no-build-isolation-package` and `[
 
 After `uv sync`, fastws writes `_fastws_pytest.pth` into the workspace venv's `site-packages` to default `PYTEST_DISABLE_PLUGIN_AUTOLOAD=1`, keeping pytest plugins installed for one repo from leaking into others. Repos enable the plugins they need via `-p` in `addopts` (override for a run with `PYTEST_DISABLE_PLUGIN_AUTOLOAD=""`).
 
-After `uv sync`, fastws runs `cargo develop` in mixed Rust/Python projects and `bindings = "bin"` Rust CLI projects, with up to one project per CPU building concurrently by default. Cargo skips unchanged compilation inputs. Projects using `fastws.build_backend` should keep only packaging inputs in `tool.uv.cache-keys`; Rust source changes are handled by Cargo.
+After `uv sync`, fastws runs `cargo develop` in mixed Rust/Python projects and `bindings = "bin"` Rust CLI projects without a `package.json`, with up to one project per CPU building concurrently by default. Cargo skips unchanged compilation inputs. Projects using `fastws.build_backend` should keep only packaging inputs in `tool.uv.cache-keys`; Rust source changes are handled by Cargo.
 
 Strictly after `cargo develop` finishes, fastws runs `cargo wasm` in parallel for every repo declaring `[tool.fastws].wasm-package`, so any `post-develop-module` generators have already produced their assets and each generated `wasm/pkg/package.json` exists before JavaScript installation.
 
 Fastws then runs `vp install` at the workspace root (driving pnpm underneath). Native pnpm workspaces link local packages whose versions satisfy their consumers' ordinary dependency ranges; consumer manifests need no local paths or special workspace protocol.
 
 After installation, fastws runs `pnpm -r --if-present --workspace-concurrency=<N> run build` (through Vite+'s managed pnpm) so local dependencies build before their consumers and independent builds share the project-concurrency limit. Packages own their build commands: AnswerUI's is `nbdev-export`, for example. Python sync runs first, so a repo-list entry such as `AnswerDotAI/answerui[dev]` supplies its Python build tools through the normal extras mechanism. No additional install lifecycle hook is needed. Cargo and other build tools retain their own incremental behavior.
+
+After the JavaScript builds finish, fastws runs `cargo develop` in `bindings = "bin"` Rust projects that also have a `package.json`, using the same concurrency limit. Binaries that embed built frontend assets then compile against the updated outputs.
 
 `--build-workers` sets the maximum concurrent projects within the Python-native, WebAssembly, and JavaScript build phases, defaulting to the CPU count; `--build-workers 1` runs each phase serially. It is separate from `--workers`, which controls cloning, pulling and dependency updates. Cargo keeps its own within-project parallelism, so increasing project concurrency also increases CPU and memory demand. Cargo may serialize builds that share a target directory.
 

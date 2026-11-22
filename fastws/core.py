@@ -1184,10 +1184,15 @@ def _merge_shared(data: dict, shared: dict) -> dict:
 
 def _rel_ws_path(root: Path, d: Path) -> str: return Path(os.path.relpath(d.resolve(), root.resolve())).as_posix()
 
+def _maturin_cfg(d: Path) -> dict:
+    p = d/'pyproject.toml'
+    return tomllib.loads(p.read_text()).get('tool', {}).get('maturin', {}) if p.exists() else {}
+
 def _is_maturin_native(d: Path) -> bool:
-    if not (d/'pyproject.toml').exists(): return False
-    cfg = tomllib.loads((d/'pyproject.toml').read_text()).get('tool', {}).get('maturin', {})
+    cfg = _maturin_cfg(d)
     return 'python-source' in cfg or cfg.get('bindings') == 'bin'
+
+def _is_bin_with_js(d: Path) -> bool: return (d/'package.json').is_file() and _maturin_cfg(d).get('bindings') == 'bin'
 
 def _repo_roots(root: Path, repos_file="repos.txt") -> list[Path]:
     "Candidate top-level workspace directories plus registered external checkouts."
@@ -1426,12 +1431,17 @@ async def ws_sync(
         _write_pytest_pth(root)
         from .cargo import develop
         native = [d.resolve() for _,d in projects if _is_maturin_native(d)]
-        with ThreadPoolExecutor(max_workers=build_workers) as ex: list(ex.map(develop, native))
+        post_js = [d for d in native if _is_bin_with_js(d)]
+        pre_js = [d for d in native if d not in post_js]
+        if pre_js:
+            with ThreadPoolExecutor(max_workers=build_workers) as ex: list(ex.map(develop, pre_js))
         if wasm_pkgs:
             with ThreadPoolExecutor(max_workers=build_workers) as ex: list(ex.map(_build_wasm, wasm_pkgs))
         if up: _upgrade_stamp(root).touch()
         if cargo_up: _upgrade_stamp(root, "fastws-cargo-upgraded").touch()
         if js_members: _sync_js(root, build_workers)
+        if post_js:
+            with ThreadPoolExecutor(max_workers=build_workers) as ex: list(ex.map(develop, post_js))
 
 @call_parse
 async def ws_add(
