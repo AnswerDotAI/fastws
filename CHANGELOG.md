@@ -1,5 +1,12 @@
 <!-- do not remove -->
 
+## 0.0.41
+
+### New Features
+
+- Defer cargo develop for bin Rust projects with package.json until after JS builds ([#70](https://github.com/AnswerDotAI/fastws/issues/70))
+
+
 ## 0.0.40
 
 ### New Features
