@@ -375,24 +375,31 @@ def develop(root, *, profile=None):
     with store.building(root) as started:
         tool = settings(root)
         cfg = tool['maturin']
-        if 'python-source' not in cfg: raise ConfigError(r'cargo develop requires tool.maturin.python-source')
-        binaries = tool.get('fastws', {}).get('native-binaries', False)
-        artifacts = build(root, binaries=binaries, profile=profile or _dev_profile(root))
-        artifact, = [m for m in artifacts if 'cdylib' in m['target']['crate_types']]
-        lib, = [Path(f) for f in artifact['filenames'] if Path(f).suffix in ('.dylib', '.so', '.dll')]
-        module = cfg.get('module-name', artifact['target']['name'])
-        src = root/cfg['python-source']
-        ext = src/Path(*module.split('.'))
-        ext = ext.with_name(ext.name + sysconfig.get_config_var('EXT_SUFFIX'))
+        bin_only = cfg.get('bindings') == 'bin'
+        if not bin_only and 'python-source' not in cfg: raise ConfigError(r'cargo develop requires tool.maturin.python-source')
+        binaries = bin_only or tool.get('fastws', {}).get('native-binaries', False)
+        artifacts = build(root, library=not bin_only, binaries=binaries, profile=profile or _dev_profile(root))
         env = Path(os.environ.get('VIRTUAL_ENV', sys.prefix))
         scripts = env/('Scripts' if os.name == 'nt' else 'bin')
         exes = [Path(m['executable']) for m in artifacts if binaries and m.get('executable')]
-        package = src/module.split('.')[0]
-        files = {f'python/{f.relative_to(src)}': f for f in package.rglob('*') if f.is_file() and f != ext and '__pycache__' not in f.parts}
-        files |= {f'python/{ext.relative_to(src)}': lib} | {f'bin/{e.name}': e for e in exes}
+        files = {f'bin/{e.name}': e for e in exes}
+        paths = {scripts/e.name: f'bin/{e.name}' for e in exes}
+        built = list(exes)
+        if not bin_only:
+            artifact, = [m for m in artifacts if 'cdylib' in m['target']['crate_types']]
+            lib, = [Path(f) for f in artifact['filenames'] if Path(f).suffix in ('.dylib', '.so', '.dll')]
+            module = cfg.get('module-name', artifact['target']['name'])
+            src = root/cfg['python-source']
+            ext = src/Path(*module.split('.'))
+            ext = ext.with_name(ext.name + sysconfig.get_config_var('EXT_SUFFIX'))
+            package = src/module.split('.')[0]
+            files |= {f'python/{f.relative_to(src)}': f for f in package.rglob('*') if f.is_file() and f != ext and '__pycache__' not in f.parts}
+            files[f'python/{ext.relative_to(src)}'] = lib
+            paths[ext] = f'python/{ext.relative_to(src)}'
+            built.insert(0, lib)
         with store.access():
-            kept = store.keep(root, files, dict.fromkeys(f for a in [lib, *exes] for f in store.dep_files(a)), started)
-            store.install(root, kept, {ext: f'python/{ext.relative_to(src)}'} | {scripts/e.name: f'bin/{e.name}' for e in exes})
+            kept = store.keep(root, files, dict.fromkeys(f for a in built for f in store.dep_files(a)), started)
+            store.install(root, kept, paths)
         store.collect()
         if generator := tool.get('fastws', {}).get('post-develop-module'):
             subprocess.run([sys.executable, '-m', generator], cwd=root, check=True)

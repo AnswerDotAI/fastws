@@ -24,3 +24,16 @@ data = "wheel"
             assert digest == 'sha256=' + base64.urlsafe_b64encode(hashlib.sha256(data).digest()).rstrip(b'=').decode()
             assert int(size) == len(data)
         assert record[-1] == ['demo-1.0.dist-info/RECORD', '', '']
+
+
+def test_editable_wheel_bin(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    (tmp_path/'pyproject.toml').write_text('[tool.maturin]\nbindings = "bin"\n')
+    info = tmp_path/'demo-1.0.dist-info'
+    info.mkdir()
+    (info/'WHEEL').write_text('Wheel-Version: 1.0\nRoot-Is-Purelib: false\nTag: py3-none-any\n')
+    (info/'METADATA').write_text('Metadata-Version: 2.1\nName: demo\nVersion: 1.0\n')
+    with ZipFile(tmp_path/build_editable(tmp_path, metadata_directory=info)) as wheel:
+        assert 'demo-1.0.pth' not in wheel.namelist()
+        record = list(csv.reader(io.StringIO(wheel.read('demo-1.0.dist-info/RECORD').decode())))
+        assert {row[0] for row in record} == set(wheel.namelist())

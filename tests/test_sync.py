@@ -135,37 +135,6 @@ def test_ws_remove_refuses_unsafe_repos(tmp_path):
     assert (tmp_path/'repos.txt').read_text() == 'AnswerDotAI/keep\n'
 
 
-def test_cargo_key_hashes_lock_and_patched_dependency_contents(tmp_path):
-    crate, dep = tmp_path/'crate', tmp_path/'dep'
-    for d in crate, dep: (d/'src').mkdir(parents=True)
-    (crate/'Cargo.toml').write_text(r'''[dependencies]
-dep = { git = "https://example.com/dep" }
-''')
-    (dep/'Cargo.toml').touch()
-    source, lock = dep/'src'/'lib.rs', crate/'Cargo.lock'
-    source.write_text('original')
-    lock.write_text('first lock')
-    patches = {('https://example.com/dep', 'dep'): dep}
-    first = core._cargo_key(crate, patches, None)
-    lock.write_text('second lock')
-    second = core._cargo_key(crate, patches, None)
-    assert second != first
-    source.write_text('changed')
-    assert core._cargo_key(crate, patches, None) != second
-
-
-def test_cargo_lock_ignores_unused_patches(tmp_path):
-    lock = tmp_path/'Cargo.lock'
-    header = r'''version = 4
-[[package]]
-name = "crate"
-'''
-    lock.write_text(header + r'''[[patch.unused]]
-name = "unused"
-''')
-    assert core._cargo_lock_content(lock) == header.encode()
-
-
 def test_sync_cargo_patches_generates_and_preserves(tmp_path):
     (tmp_path/'.cargo').mkdir()
     config = tmp_path/'.cargo'/'config.toml'

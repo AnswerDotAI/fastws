@@ -87,6 +87,7 @@ The workspace `pyproject.toml` is local generated state. `ws-sync` creates it fr
 /uv.lock
 /.cargo/
 /.fastws-upgraded
+/.fastws-cargo-upgraded
 ```
 
 Keep project checkouts out of the workspace Git index too. When migrating a workspace that already tracks generated files, save local copies before pulling the change that untracks them, then restore those copies afterward. Also save personal repo entries to `repos-local.txt` before pulling a smaller baseline.
@@ -186,7 +187,7 @@ cargo develop --path /path/to/project
 cargo develop --profile quick
 ```
 
-Run from the project root, or give its directory with `--path`. The command reads `python-source`, `module-name`, `manifest-path` and features from `[tool.maturin]`. `[tool.fastws] dev-profile = "quick"` selects a project's default for both `cargo develop` and `fastws.cargo.run_tests`. Without that setting they use `test`. An explicit `--profile NAME` overrides the project default. The project must produce a `cdylib` and set `python-source`. Define the selected profile in `Cargo.toml` and keep incremental compilation enabled for the local crate.
+Run from the project root, or give its directory with `--path`. The command reads `python-source`, `module-name`, `manifest-path`, `bindings` and features from `[tool.maturin]`. `[tool.fastws] dev-profile = "quick"` selects a project's default for both `cargo develop` and `fastws.cargo.run_tests`. Without that setting they use `test`. An explicit `--profile NAME` overrides the project default. Mixed projects must produce a `cdylib` and set `python-source`; `bindings = "bin"` projects build and install their binary targets directly into the active venv. Define the selected profile in `Cargo.toml` and keep incremental compilation enabled for the local crate.
 
 The workspace's `[tool.fastws] cargo = "/path/to/cargo"` optionally selects one explicit Cargo executable for fastws builds, checks, metadata and tests, including nextest's subordinate Cargo calls. A missing executable fails without falling back. With no selection, subprocess uses its normal PATH and working-directory rules. Upstream Cargo stays installed and usable; manifests, profiles, features and package selection are unchanged.
 
@@ -214,7 +215,7 @@ On Unix, cooperating `cargo develop` runs take a per-project lock through compil
 
 On Unix, every rustc call holds a shared `flock` on `/tmp/aai-ws-timing.lock`, through the rustc wrapper that sync writes (see `ws-sync`). A speed test that takes that lock exclusively stays apart from participating builds and test runs. A timing also holds `/tmp/aai-ws-timing.gate` while it waits for the lock and holds it, and a shared hold passes that file first, so new rustc calls and test runs wait behind the timing. Both shared and exclusive acquisition fail after 5 minutes; work never proceeds unlocked. Python code takes the same lock with `fastws.timelock.timing_lock`: `with timing_lock(exclusive=True):` around a timing, and `with timing_lock():` around a test run. Shared-inside-shared in one thread reuses its hold; each thread otherwise takes its own hold. Any nesting involving exclusive raises `RuntimeError` immediately. An exclusive hold that has waited 30 seconds prints the processes that have the lock's file open. Windows builds and tests run without this timing coordination.
 
-Use `fastws.build_backend` as the build backend of a mixed project, and include `fastws-cli>=0.0.29` alongside `maturin>=1.13,<2.0` in `[build-system].requires`. Its editable builds install only Python metadata and the source path, and compile no Rust. `ws-sync` then runs `cargo develop` to build and install the extension, the binaries and the wheel data files. After standalone `uv sync`, run `cargo develop` yourself.
+Use `fastws.build_backend` as the build backend of a mixed Rust/Python project (with `fastws-cli>=0.0.29` alongside `maturin>=1.13,<2.0` in `[build-system].requires`) or a `bindings = "bin"` Rust CLI project (`fastws-cli>=0.0.39`). Its editable builds install only Python metadata (and the source path when `python-source` is set) and compile no Rust. `ws-sync` then runs `cargo develop` to build and install the extension, binaries and wheel data files. After standalone `uv sync`, run `cargo develop` yourself.
 
 For distribution wheels containing the binaries, also set `[tool.maturin].data` to a generated wheel-data directory. With `native-binaries = true`, wheel builds through the backend replace its `scripts/` subdirectory with the current Python-free binaries, then delegate packaging to maturin. Explicit profile, target and feature arguments from maturin's build settings also apply to the binaries. Without `native-binaries`, wheel builds go straight to maturin, and `[tool.maturin].data` is optional.
 
@@ -323,7 +324,7 @@ Before `uv sync`, fastws regenerates `tool.uv.no-build-isolation-package` with t
 
 After `uv sync`, fastws writes `_fastws_pytest.pth` into the workspace venv's `site-packages` to default `PYTEST_DISABLE_PLUGIN_AUTOLOAD=1`, keeping pytest plugins installed for one repo from leaking into others. Repos enable the plugins they need via `-p` in `addopts` (override for a run with `PYTEST_DISABLE_PLUGIN_AUTOLOAD=""`).
 
-After `uv sync`, fastws runs `cargo develop` in mixed Rust/Python projects, with up to one project per CPU building concurrently by default. Cargo skips unchanged compilation inputs. Projects using `fastws.build_backend` should keep only packaging inputs in `tool.uv.cache-keys`; Rust source changes are handled by Cargo. Maturin packages with `bindings = "bin"` keep their existing uv installation path.
+After `uv sync`, fastws runs `cargo develop` in mixed Rust/Python projects and `bindings = "bin"` Rust CLI projects, with up to one project per CPU building concurrently by default. Cargo skips unchanged compilation inputs. Projects using `fastws.build_backend` should keep only packaging inputs in `tool.uv.cache-keys`; Rust source changes are handled by Cargo.
 
 Strictly after `cargo develop` finishes, fastws runs `cargo wasm` in parallel for every repo declaring `[tool.fastws].wasm-package`, so any `post-develop-module` generators have already produced their assets and each generated `wasm/pkg/package.json` exists before JavaScript installation.
 
@@ -335,9 +336,7 @@ After installation, fastws runs `pnpm -r --if-present --workspace-concurrency=<N
 
 When JavaScript workspaces are present, fastws requires Vite+ (`vp`) on `PATH` with managed `node` and `pnpm` shims active (`curl -fsSL https://vite.plus | bash`, with Vite+'s bin directory ahead of Homebrew on `PATH`). When WebAssembly packages (`[tool.fastws].wasm-package`) are present, fastws also requires rustup's `rustc`/`cargo` proxies and the `wasm32-unknown-unknown` target (`rustup target add wasm32-unknown-unknown`).
 
-At most once per day, sync upgrades dependencies with `uv sync -U` and a parallel `cargo update` in every member with a `Cargo.toml`. It prints the changes and records the run in a stamp file inside the workspace's `.git` directory. Pass `--upgrade` to force an upgrade regardless of the last run time.
-
-Before every uv sync, `ws-sync` writes `.git/fastws-cargo-key` for each member crate. The key hashes `Cargo.lock` contents and the workspace Cargo patch configuration. For Git dependencies redirected to local paths by `[patch."<url>"]`, it also hashes each patched crate's `Cargo.toml`, `build.rs`, and `src` tree, recursively. The file is rewritten only when that content changes, so projects can use `{ file = ".git/fastws-cargo-key" }` in `tool.uv.cache-keys` without rebuilding after a timestamp-only `Cargo.lock` write.
+At most once per day, sync upgrades Python dependencies with `uv sync -U`, and at most once every seven days it runs a parallel `cargo update` in every member with a `Cargo.toml`. It prints the changes and records each run in its own stamp file inside the workspace's `.git` directory (`fastws-upgraded` and `fastws-cargo-upgraded`). Pass `--upgrade` to force both upgrades regardless of the last run time.
 
 ```bash
 ws-sync

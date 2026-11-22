@@ -2,7 +2,7 @@
 
 __all__ = ["ws_setup", "ws_clone", "ws_pull", "ws_status", "ws_branches", "ws_build", "ws_sync", "ws_add", "ws_remove", "cargo_develop", "cargo_stage", "cargo_wait", "cargo_setup"]
 
-import ast, fnmatch, hashlib, json, os, re, shlex, shutil, subprocess, sys, tarfile, time
+import ast, fnmatch, json, os, re, shlex, shutil, subprocess, sys, tarfile, time
 from pathlib import Path
 from contextlib import contextmanager
 from concurrent.futures import ThreadPoolExecutor
@@ -748,34 +748,19 @@ def ws_build(
     print(f"{built} built, {len(artifacts)-len(todo)} up to date" + (f", {failed} failed" if failed else ""), file=sys.stderr)
     if failed: raise SystemExit(1)
     print(out_path)
-def _upgrade_stamp(root: Path) -> Path:
+def _upgrade_stamp(root: Path, name: str = "fastws-upgraded") -> Path:
     "Stamp whose mtime records the last dependency upgrade; kept inside .git (never tracked) when the root is a git repo."
     gitdir = root/".git"
-    return gitdir/"fastws-upgraded" if gitdir.is_dir() else root/".fastws-upgraded"
+    return gitdir/name if gitdir.is_dir() else root/f".{name}"
 
-def _should_upgrade(root: Path, max_age: float = 86400) -> bool:
+def _should_upgrade(root: Path, max_age: float = 86400, name: str = "fastws-upgraded") -> bool:
     "True when this workspace hasn't upgraded dependencies within `max_age` seconds."
-    stamp = _upgrade_stamp(root)
+    stamp = _upgrade_stamp(root, name)
     return not stamp.exists() or time.time() - stamp.stat().st_mtime > max_age
-
-_CARGO_KEY = Path(".git/fastws-cargo-key")
 
 def _crate_dirs(root: Path) -> list[Path]:
     "Root dirs containing a Cargo.toml: the crate view of the workspace, independent of uv membership"
     return [d for d in _project_dirs(root, "Cargo.toml") if not d.name.startswith((".", "_"))]
-
-def _cargo_patches(root: Path):
-    "Local Cargo patches keyed by normalized Git URL and package name, plus their config file."
-    config = root/".cargo"/"config.toml"
-    if not config.exists(): return {}, None
-    data = tomllib.loads(config.read_text())
-    patches = {}
-    for url, entries in data.get("patch", {}).items():
-        for name, spec in entries.items():
-            if not isinstance(spec, dict) or not (path := spec.get("path")): continue
-            path = Path(path).expanduser()
-            patches[(_repo_key(url), name)] = path if path.is_absolute() else (config.parent/path).resolve()
-    return patches, config
 
 def _crate_manifests(d: Path):
     "(parsed `Cargo.toml`, dir) for the crate or workspace at `d` and each of its cargo workspace members"
@@ -935,54 +920,6 @@ def _cargo_dep_tables(data, every=False):
         for name in names: yield target.get(name, {})
     if every: yield data.get("workspace", {}).get("dependencies", {})
 
-def _patched_cargo_deps(crate: Path, patches):
-    data = tomllib.loads((crate/"Cargo.toml").read_text())
-    for deps in _cargo_dep_tables(data):
-        for name, spec in deps.items():
-            if not isinstance(spec, dict) or not (url := spec.get("git")): continue
-            if path := patches.get((_repo_key(url), spec.get("package", name))): yield path
-
-def _cargo_input_files(crate: Path):
-    for name in "Cargo.toml","build.rs":
-        if (path := crate/name).exists(): yield path
-    src = crate/"src"
-    if src.exists(): yield from sorted(path for path in src.rglob("*") if path.is_file())
-
-def _cargo_lock_content(path: Path) -> bytes:
-    "Cargo.lock bytes without Cargo's order-unstable bookkeeping for unused patches"
-    if not path.exists(): return b""
-    return re.sub(r"(?ms)^\[\[patch\.unused\]\]\n.*?(?=^\[\[|\Z)", "", path.read_text()).encode()
-
-def _cargo_key(crate: Path, patches, config):
-    h = hashlib.sha256()
-    def add_content(content, name):
-        h.update(name.encode())
-        h.update(b"\0")
-        h.update(content)
-        h.update(b"\0")
-    def add(path, name): add_content(path.read_bytes() if path.exists() else b"", name)
-    add_content(_cargo_lock_content(crate/"Cargo.lock"), "Cargo.lock")
-    if config: add(config, ".cargo/config.toml")
-    seen = set()
-    def add_dep(dep):
-        dep = dep.resolve()
-        if dep in seen: return
-        seen.add(dep)
-        for path in _cargo_input_files(dep): add(path, f"{dep.name}/{path.relative_to(dep)}")
-        for child in _patched_cargo_deps(dep, patches): add_dep(child)
-    for dep in _patched_cargo_deps(crate, patches): add_dep(dep)
-    return h.hexdigest()
-
-def _sync_cargo_keys(root: Path):
-    "Update content-derived uv keys for workspace crates, without touching unchanged keys."
-    patches, config = _cargo_patches(root)
-    for crate in _crate_dirs(root):
-        key = crate/_CARGO_KEY
-        if not key.parent.is_dir(): continue
-        value = _cargo_key(crate, patches, config)
-        if key.exists() and key.read_text().strip() == value: continue
-        key.write_text(value + "\n")
-
 def _cargo_update(root: Path, workers: int = 16):
     "Float each member crate's Cargo.lock to latest matching versions, in parallel; prints what moved."
     crates = _crate_dirs(root)
@@ -1017,7 +954,7 @@ def _rel_ws_path(root: Path, d: Path) -> str: return Path(os.path.relpath(d.reso
 def _is_maturin_native(d: Path) -> bool:
     if not (d/'pyproject.toml').exists(): return False
     cfg = tomllib.loads((d/'pyproject.toml').read_text()).get('tool', {}).get('maturin', {})
-    return 'python-source' in cfg and cfg.get('bindings') != 'bin'
+    return 'python-source' in cfg or cfg.get('bindings') == 'bin'
 
 def _repo_roots(root: Path, repos_file="repos.txt") -> list[Path]:
     "Candidate top-level workspace directories plus registered external checkouts."
@@ -1210,7 +1147,7 @@ async def ws_sync(
     upgrade: bool = False,  # Force the once-daily dependency upgrade pass
     build_workers: int = os.cpu_count() or 1,  # Concurrent projects per build phase; defaults to CPU count
 ):
-    "Pull the workspace baseline, clone missing shared/local repos, then pull projects and sync; upgrade dependencies daily."
+    "Pull the workspace baseline, clone missing shared/local repos, then pull projects and sync; upgrade Python deps daily and Cargo deps weekly."
     with _cli_errors():
         root = _ws_root(workspace, repos_file, pyproject_file, template_file)
         repos_path = _resolve_path(root, repos_file)
@@ -1259,8 +1196,8 @@ async def ws_sync(
             print(f"⚠️  Skipping uv sync, not Python projects yet (scaffold with e.g. nbdev-new or ship-new, or remove): {', '.join(bad)}")
             return
         up = upgrade or _should_upgrade(root)
-        if up: _cargo_update(root, workers=workers)
-        _sync_cargo_keys(root)
+        cargo_up = upgrade or _should_upgrade(root, max_age=7*86400, name="fastws-cargo-upgraded")
+        if cargo_up: _cargo_update(root, workers=workers)
         subprocess.run(["uv", "sync", "-U"] if up else ["uv", "sync"], check=True, cwd=root)
         _write_pytest_pth(root)
         from .cargo import develop
@@ -1269,6 +1206,7 @@ async def ws_sync(
         if wasm_pkgs:
             with ThreadPoolExecutor(max_workers=build_workers) as ex: list(ex.map(_build_wasm, wasm_pkgs))
         if up: _upgrade_stamp(root).touch()
+        if cargo_up: _upgrade_stamp(root, "fastws-cargo-upgraded").touch()
         if js_members: _sync_js(root, build_workers)
 
 @call_parse
