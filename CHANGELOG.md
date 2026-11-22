@@ -1,5 +1,12 @@
 <!-- do not remove -->
 
+## 0.0.40
+
+### New Features
+
+- Add toolchain and R2 sccache setup to ws-setup, gate metadata-only editable builds on config settings, and run weekly rustup updates ([#69](https://github.com/AnswerDotAI/fastws/issues/69))
+
+
 ## 0.0.39
 
 ### New Features
