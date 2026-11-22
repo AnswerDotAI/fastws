@@ -74,7 +74,7 @@ Keep `repos.txt` tracked in the workspace Git repo. Put personal additions in a 
 
 `--repos-file myrepos.txt` uses `myrepos-local.txt` alongside it. Either list may be absent. Removing a repo from the baseline does not delete its checkout. The next sync discovers an existing root checkout as a personal addition unless `[tool.fastws].exclude` matches its path. External checkouts also remain on disk; add them to the local list to keep managing them.
 
-The workspace `pyproject.toml` is local generated state. `ws-sync` creates it from the tracked `pyproject.tmpl` when available, or generates a minimal one, then maintains it while preserving personal settings except for the managed repo extras, workspace exclusions, and build-isolation list. The template supplies starting defaults only: later template edits do not overwrite existing configuration. Ignore these files in the workspace repo (not in its member repos):
+The workspace `pyproject.toml` is local generated state. `ws-sync` creates it from the tracked `pyproject.tmpl` when available, or generates a minimal one, then maintains it while preserving personal settings except for the managed repo extras, workspace exclusions, build-isolation list, and `metadata-only` backend config settings. The template supplies starting defaults only: later template edits do not overwrite existing configuration. Ignore these files in the workspace repo (not in its member repos):
 
 ```gitignore
 /repos-local.txt
@@ -111,16 +111,28 @@ echo source ~/aai-ws/.venv/bin/activate >> ~/.bashrc
 
 ### `ws-setup`
 
-Clone a workspace repo into a new directory, create its `.venv`, install fastws, and run that environment's `ws-sync`. It targets the new environment even when another workspace or uv tool environment is already active. It does not change the caller's environment, shell startup files, or harness settings.
+Bootstrap a new workspace, or check an existing workspace and complete any missing toolchain and `sccache` setup.
 
 ```bash
-ws-setup AnswerDotAI/aai-ws ~/aai-ws
-ws-setup AnswerDotAI/private-ws ~/aai-ws
-ws-setup owner/workspace ~/my-workspace --python 3.13
+ws-setup                                        # check/configure the active workspace
+ws-setup --workspace ~/aai-ws                   # check/configure a specific workspace
+ws-setup AnswerDotAI/aai-ws ~/aai-ws            # bootstrap a new workspace
 ws-setup AnswerDotAI/private-ws ~/aai-ws --workers 8
+ws-setup owner/workspace ~/my-workspace --python 3.13
 ```
 
-The destination must not exist, including as an empty directory or a symlink. A failed step stops setup and leaves the checkout in place for inspection; it never deletes a partial workspace automatically. For an existing workspace, activate its environment and use `ws-sync` instead. Workspace repos should include fastws in their repo list or package dependencies so syncing retains the workspace commands.
+With `repo` and `dest`, `ws-setup` clones the workspace repo into a new directory (which must not exist, including as an empty directory or symlink), creates its `.venv`, installs fastws, clones the workspace repos, installs any missing Rust/WebAssembly/JavaScript prerequisites and `sccache` config, and runs that environment's `ws-sync`. It targets the new environment even when another workspace or uv tool environment is already active, and never changes shell startup files or harness settings. A failed step leaves the checkout in place for inspection.
+
+With no `repo`, `ws-setup` inspects the existing workspace and completes any missing steps idempotently: installing `rustup` and `wasm32-unknown-unknown` when Rust/WebAssembly packages are present, installing `sccache`, installing Vite+ (`vp`) and enabling its managed `node`/`pnpm` shims when JavaScript packages are present, and configuring `sccache` when `SCCACHE_R2` is set.
+
+Set `SCCACHE_R2` to a single R2 URL to configure multilevel local-disk + Cloudflare R2 `sccache` caching:
+
+```bash
+export SCCACHE_R2="https://<access_key_id>:<secret_access_key>@<account_id>.r2.cloudflarestorage.com/<bucket>"
+ws-setup
+```
+
+`ws-setup` writes `[cache.multilevel]` (`disk` + `s3`), `[cache.disk]`, `[cache.s3]`, and the workspace root under `basedirs` into the platform `sccache` config (`~/Library/Application Support/Mozilla.sccache/config` on macOS, `~/.config/sccache/config` on Linux, or `SCCACHE_CONF`), preserving existing `basedirs` and unrelated sections. Credentials are written to an isolated `[r2-sccache]` profile in `~/.aws/credentials` (leaving `[default]` untouched), and `.cargo/rustc-lock` selects that profile for `sccache`. Append `?rw_mode=READ_ONLY` for read-only tokens, omit credentials for public read-only buckets, or add `/<prefix>` after `<bucket>` for a `key_prefix`.
 
 ### `ws-clone`
 
@@ -215,7 +227,7 @@ On Unix, cooperating `cargo develop` runs take a per-project lock through compil
 
 On Unix, every rustc call holds a shared `flock` on `/tmp/aai-ws-timing.lock`, through the rustc wrapper that sync writes (see `ws-sync`). A speed test that takes that lock exclusively stays apart from participating builds and test runs. A timing also holds `/tmp/aai-ws-timing.gate` while it waits for the lock and holds it, and a shared hold passes that file first, so new rustc calls and test runs wait behind the timing. Both shared and exclusive acquisition fail after 5 minutes; work never proceeds unlocked. Python code takes the same lock with `fastws.timelock.timing_lock`: `with timing_lock(exclusive=True):` around a timing, and `with timing_lock():` around a test run. Shared-inside-shared in one thread reuses its hold; each thread otherwise takes its own hold. Any nesting involving exclusive raises `RuntimeError` immediately. An exclusive hold that has waited 30 seconds prints the processes that have the lock's file open. Windows builds and tests run without this timing coordination.
 
-Use `fastws.build_backend` as the build backend of a mixed Rust/Python project (with `fastws-cli>=0.0.29` alongside `maturin>=1.13,<2.0` in `[build-system].requires`) or a `bindings = "bin"` Rust CLI project (`fastws-cli>=0.0.39`). Its editable builds install only Python metadata (and the source path when `python-source` is set) and compile no Rust. `ws-sync` then runs `cargo develop` to build and install the extension, binaries and wheel data files. After standalone `uv sync`, run `cargo develop` yourself.
+Use `fastws.build_backend` as the build backend of a mixed Rust/Python project (with `fastws-cli>=0.0.29` alongside `maturin>=1.13,<2.0` in `[build-system].requires`) or a `bindings = "bin"` Rust CLI project (`fastws-cli>=0.0.39`). Inside a fastws workspace, `ws-sync` writes `[tool.uv.config-settings-package]` with `metadata-only = "1"` into the workspace `pyproject.toml`, so editable builds through `uv sync` install only Python metadata (and the source path when `python-source` is set) and leave Rust compilation to `cargo develop`, which installs the extension, binaries, and wheel data files. Outside the workspace, including `pip install -e .` in CI and standalone installs, editable builds receive no `metadata-only` setting, stage any `native-binaries`, and delegate to maturin so they compile normally.
 
 For distribution wheels containing the binaries, also set `[tool.maturin].data` to a generated wheel-data directory. With `native-binaries = true`, wheel builds through the backend replace its `scripts/` subdirectory with the current Python-free binaries, then delegate packaging to maturin. Explicit profile, target and feature arguments from maturin's build settings also apply to the binaries. Without `native-binaries`, wheel builds go straight to maturin, and `[tool.maturin].data` is optional.
 
@@ -310,7 +322,7 @@ Sync also defaults `[term] quiet = true` in that file to suppress routine Cargo 
 
 Do not commit a `Cargo.lock` generated under these patches. Its source-less local entries cannot be resolved on another machine.
 
-Sync writes `.cargo/rustc-lock` and makes it Cargo's `rustc-wrapper`. The script runs each rustc call holding the timing lock shared (see `cargo develop` above). Inside the lock it runs the wrapper that the config named before sync first wrote the script, where another tool set one, and otherwise `sccache` when it's installed, so unchanged compilation units are reused across the workspace's otherwise-independent Cargo target directories. Later syncs keep that inner wrapper. The script costs about 9 ms a rustc call, mostly the Python interpreter's start. If `sccache` isn't installed, sync warns with the install command (`cargo install sccache --locked`) and continues; rerun `ws-sync` after installing to enable it. On Windows, where the lock does nothing, the config keeps another tool's wrapper, or else names `sccache`.
+Sync writes `.cargo/rustc-lock` and makes it Cargo's `rustc-wrapper`. The script runs each rustc call holding the timing lock shared (see `cargo develop` above). Inside the lock it runs the wrapper that the config named before sync first wrote the script, where another tool set one, and otherwise `sccache` when it's installed, so unchanged compilation units are reused across the workspace's otherwise-independent Cargo target directories. When `ws-setup` has configured an isolated `r2-sccache` AWS credentials profile for a shared R2 cache, the script passes `AWS_PROFILE=r2-sccache` to `sccache` (clearing ambient `AWS_*` keys in that child process) so it never collides with AWS CLI or `boto3`. Later syncs keep that inner wrapper. The script costs about 9 ms a rustc call, mostly the Python interpreter's start. If `sccache` isn't installed—or `SCCACHE_R2` is set without matching `sccache` config—sync warns and tells you to run `ws-setup`. On Windows, where the lock does nothing, the config keeps another tool's wrapper, or else names `sccache`.
 
 For an isolated build workspace, `fastws.core.cargo_setup(root)` regenerates these Cargo patches and the same compiler wrapper without pulling, syncing Python or building.
 
@@ -320,7 +332,7 @@ Each sync updates `packages` in the root `pnpm-workspace.yaml` (creating it with
 
 When JavaScript workspace members are present, `ws-sync` reads `vp toolchain --json -g` and populates `devDependencies["vite-plus"]` in `package.json` plus matching `vite@*` and `vitest@*` entries under `overrides` in `pnpm-workspace.yaml`. Optional tracked `pnpm-workspace.shared.yaml` and `package.json.shared` files are merged on top on every sync. Object-valued fields merge one level deep, shared values win conflicts, and arrays replace rather than concatenate. Unrelated local settings remain; removing a shared key does not delete its local value. Use these files to declare `packageManager`, `devEngines.runtime`, shared policies such as `allowBuilds`, or explicit Vite+ overrides.
 
-Before `uv sync`, fastws regenerates `tool.uv.no-build-isolation-package` with the sorted package names of projects using `fastws.build_backend`, including external checkouts. These builds use the shared environment's `fastws-cli` and `maturin`. Leave global build isolation enabled for other projects.
+Before `uv sync`, fastws regenerates `tool.uv.no-build-isolation-package` and `[tool.uv.config-settings-package]` (`metadata-only = "1"`) with the sorted package names of projects using `fastws.build_backend`, including external checkouts. These builds use the shared environment's `fastws-cli` and `maturin`, skip Rust compilation during editable installs inside the workspace, and keep metadata-only wheels separate from compiled editable wheels in uv's cache. Leave global build isolation enabled for other projects.
 
 After `uv sync`, fastws writes `_fastws_pytest.pth` into the workspace venv's `site-packages` to default `PYTEST_DISABLE_PLUGIN_AUTOLOAD=1`, keeping pytest plugins installed for one repo from leaking into others. Repos enable the plugins they need via `-p` in `addopts` (override for a run with `PYTEST_DISABLE_PLUGIN_AUTOLOAD=""`).
 
@@ -334,9 +346,9 @@ After installation, fastws runs `pnpm -r --if-present --workspace-concurrency=<N
 
 `--build-workers` sets the maximum concurrent projects within the Python-native, WebAssembly, and JavaScript build phases, defaulting to the CPU count; `--build-workers 1` runs each phase serially. It is separate from `--workers`, which controls cloning, pulling and dependency updates. Cargo keeps its own within-project parallelism, so increasing project concurrency also increases CPU and memory demand. Cargo may serialize builds that share a target directory.
 
-When JavaScript workspaces are present, fastws requires Vite+ (`vp`) on `PATH` with managed `node` and `pnpm` shims active (`curl -fsSL https://vite.plus | bash`, with Vite+'s bin directory ahead of Homebrew on `PATH`). When WebAssembly packages (`[tool.fastws].wasm-package`) are present, fastws also requires rustup's `rustc`/`cargo` proxies and the `wasm32-unknown-unknown` target (`rustup target add wasm32-unknown-unknown`).
+When JavaScript workspaces are present, fastws requires Vite+ (`vp`) on `PATH` with managed `node` and `pnpm` shims active. When WebAssembly packages (`[tool.fastws].wasm-package`) are present, fastws also requires rustup's `rustc`/`cargo` proxies and the `wasm32-unknown-unknown` target. Run `ws-setup` to install or configure any missing prerequisites.
 
-At most once per day, sync upgrades Python dependencies with `uv sync -U`, and at most once every seven days it runs a parallel `cargo update` in every member with a `Cargo.toml`. It prints the changes and records each run in its own stamp file inside the workspace's `.git` directory (`fastws-upgraded` and `fastws-cargo-upgraded`). Pass `--upgrade` to force both upgrades regardless of the last run time.
+At most once per day, sync upgrades Python dependencies with `uv sync -U`. At most once every seven days, when Rust crates are present, it updates the stable toolchain with `rustup update stable` (if `rustup` is on `PATH` and no `rust-toolchain.toml` or `rust-toolchain` exists at the workspace root) and runs a parallel `cargo update` in every member with a `Cargo.toml`. It prints the changes and records each run in its own stamp file inside the workspace's `.git` directory (`fastws-upgraded` and `fastws-cargo-upgraded`). Pass `--upgrade` to force both upgrades regardless of the last run time.
 
 ```bash
 ws-sync

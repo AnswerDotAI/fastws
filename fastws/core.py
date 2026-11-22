@@ -2,11 +2,12 @@
 
 __all__ = ["ws_setup", "ws_clone", "ws_pull", "ws_status", "ws_branches", "ws_build", "ws_sync", "ws_add", "ws_remove", "cargo_develop", "cargo_stage", "cargo_wait", "cargo_setup"]
 
-import ast, fnmatch, json, os, re, shlex, shutil, subprocess, sys, tarfile, time
+import ast, configparser, fnmatch, json, os, re, shlex, shutil, subprocess, sys, tarfile, time
 from pathlib import Path
 from contextlib import contextmanager
 from concurrent.futures import ThreadPoolExecutor
 from tempfile import TemporaryDirectory
+from urllib.parse import parse_qs, unquote, urlsplit
 
 from fastcore.parallel import parallel_async_gen
 from fastcore.script import call_parse
@@ -67,14 +68,18 @@ def _repo_key(repo: str) -> str: return repo.strip().rstrip("/").removesuffix(".
 
 def _pkg_key(name: str) -> str: return canonicalize_name(name)
 
+def _toml_key(k: str) -> str: return k if re.fullmatch(r"[A-Za-z0-9_-]+", k) else json.dumps(k)
+
 def _fmt_toml_val(v) -> str:
     if isinstance(v, bool): return "true" if v else "false"
+    if isinstance(v, int): return str(v)
     if isinstance(v, str): return json.dumps(v)
-    raise SystemExit(f"Unsupported value in [tool.uv.sources]: {v!r}")
+    if isinstance(v, list): return "[" + ", ".join(_fmt_toml_val(x) for x in v) + "]"
+    raise SystemExit(f"Unsupported TOML value: {v!r}")
 
 def _fmt_source(src: dict) -> str:
-    "A `[tool.uv.sources]` value as a TOML inline table, e.g. `{ path = \"../x\", editable = true }`"
-    return "{ " + ", ".join(f"{k} = {_fmt_toml_val(v)}" for k,v in src.items()) + " }"
+    "A TOML inline table, e.g. `{ path = \"../x\", editable = true }`"
+    return "{ " + ", ".join(f"{_toml_key(k)} = {_fmt_toml_val(v)}" for k,v in src.items()) + " }"
 
 def _ws_root(workspace: str = "", repos_file: str = "repos.txt", pyproject_file: str = "pyproject.toml",
     template_file: str = "pyproject.tmpl") -> Path:
@@ -343,14 +348,33 @@ def _sync_ws_pyproject(pyproject_path: Path, template_path: Path, projects: list
     if content != original: pyproject_path.write_text(content)
     return missing + [n for n,_ in ext_missing]
 
-def _sync_build_isolation(pyproject_path: Path, projects: list[tuple[str, Path]]):
-    "Regenerate uv's non-isolated build list from the projects using the fastws backend."
+def _sync_build_backend(pyproject_path: Path, projects: list[tuple[str, Path]]):
+    "Regenerate uv's build-isolation and metadata-only config settings for projects using the fastws backend."
+    from .build_backend import METADATA_ONLY
     content = pyproject_path.read_text()
     packages = sorted({name for name,d in projects
         if tomllib.loads((d/'pyproject.toml').read_text()).get('build-system', {}).get('build-backend') == 'fastws.build_backend'})
-    current = tomllib.loads(content).get('tool', {}).get('uv', {}).get('no-build-isolation-package', [])
-    if packages == current: return
-    content = _replace_array(content, 'tool.uv', 'no-build-isolation-package', packages)
+    uv = tomllib.loads(content).get('tool', {}).get('uv', {})
+    cur_iso = uv.get('no-build-isolation-package', [])
+    cur_cfg = uv.get('config-settings-package', {})
+    pkg_keys = {_pkg_key(p): p for p in packages}
+    new_cfg = {}
+    for pkg, opts in cur_cfg.items():
+        if not isinstance(opts, dict): continue
+        merged = {k: v for k, v in opts.items() if k != METADATA_ONLY}
+        if (key := _pkg_key(pkg)) in pkg_keys:
+            merged[METADATA_ONLY] = '1'
+            new_cfg[pkg_keys[key]] = merged
+        elif merged: new_cfg[pkg] = merged
+    for pkg in packages: new_cfg.setdefault(pkg, {METADATA_ONLY: '1'})
+    if packages == cur_iso and new_cfg == cur_cfg: return
+    if packages != cur_iso: content = _replace_array(content, 'tool.uv', 'no-build-isolation-package', packages)
+    if new_cfg != cur_cfg:
+        if new_cfg:
+            lines = "\n".join(f"{_toml_key(pkg)} = {_fmt_source(new_cfg[pkg])}" for pkg in sorted(new_cfg))
+            content = _replace_table(content, 'tool.uv.config-settings-package', lines)
+        elif span := _table_span(content, 'tool.uv.config-settings-package'):
+            content = content[:span[0]] + content[span[1]:]
     tomllib.loads(content)
     pyproject_path.write_text(content)
 
@@ -448,30 +472,101 @@ async def _changed_dirs(dirs: list[Path]) -> list[Path]:
     heads = await _remote_heads([(s, b) for _, (s, b, _) in known])
     return [d for ((d, (_, _, local)), remote) in zip(known, heads) if remote != local] + unknown
 
+def _prepend_path(env: dict, *dirs: Path):
+    cur = env.get("PATH", "").split(os.pathsep) if env.get("PATH") else []
+    add = [str(d) for d in dirs if d.is_dir() and str(d) not in cur]
+    if add: env["PATH"] = os.pathsep.join(add + cur)
+
+def _setup_tools(root: Path, repos_file: str = "repos.txt", env: dict = None) -> tuple[list[str], dict]:
+    "Check workspace toolchain and sccache prerequisites, installing or configuring anything missing."
+    env = dict(os.environ if env is None else env)
+    which = lambda cmd: shutil.which(cmd, path=env.get("PATH", ""))
+    actions = []
+    has_rust = bool(_crate_dirs(root))
+    wasm_pkgs = _wasm_packages(root, repos_file)
+    js_members = _js_dirs(root, repos_file)
+    if has_rust or wasm_pkgs:
+        if not which("rustup") and (wasm_pkgs or not which("cargo")):
+            if os.name == "nt": raise SystemExit("Install rustup from https://rustup.rs, then rerun ws-setup.")
+            subprocess.run(["sh", "-c", "curl --proto =https --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --default-toolchain stable"], env=env, check=True)
+            _prepend_path(env, Path(env.get("CARGO_HOME", Path.home()/".cargo"))/"bin")
+            actions.append("installed rustup (stable)")
+        if rustup := which("rustup"):
+            if wasm_pkgs:
+                for tool in "rustc", "cargo":
+                    p = which(tool)
+                    if not (p and os.path.samefile(p, rustup)):
+                        print(f"⚠️  {tool} resolves to {p or 'nothing'} rather than rustup; put $HOME/.cargo/bin first on PATH.")
+                installed = subprocess.run([rustup, "target", "list", "--installed"], capture_output=True, text=True, env=env, check=True).stdout.splitlines()
+                if "wasm32-unknown-unknown" not in installed:
+                    subprocess.run([rustup, "target", "add", "wasm32-unknown-unknown"], env=env, check=True)
+                    actions.append("added wasm32-unknown-unknown target")
+        if has_rust:
+            if not which("sccache"):
+                if cargo := which("cargo"):
+                    subprocess.run([cargo, "install", "sccache", "--locked"], env=env, check=True)
+                    actions.append("installed sccache")
+                else: print("⚠️  cargo not found; install Rust first, then rerun ws-setup to install sccache.")
+            if _sync_sccache_config(root):
+                actions.append("configured sccache for SCCACHE_R2")
+                if sccache := which("sccache"):
+                    subprocess.run([sccache, "--stop-server"], env=env, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+                if (lock := root/".cargo/rustc-lock").exists(): lock.touch()  # invalidate Cargo's cached .rustc_info.json
+            _sync_cargo_wrapper(root, env=env)
+    if js_members:
+        if not which("vp"):
+            if os.name == "nt": raise SystemExit("Install Vite+ from https://viteplus.dev, then rerun ws-setup.")
+            subprocess.run(["sh", "-c", "curl -fsSL https://vite.plus | bash"], env=env, check=True)
+            _prepend_path(env, Path.home()/".vite-plus/bin", Path.home()/".local/bin")
+            actions.append("installed Vite+ (vp)")
+        if vp := which("vp"):
+            if any(not ((p := which(t)) and os.path.samefile(p, vp)) for t in ("node", "pnpm")):
+                subprocess.run([vp, "env", "on"], env=env, check=True)
+                actions.append("enabled Vite+ managed shims")
+                for t in ("node", "pnpm"):
+                    p = which(t)
+                    if not (p and os.path.samefile(p, vp)):
+                        print(f"⚠️  {t} still resolves to {p or 'nothing'} rather than vp; put Vite+'s bin dir first on PATH (e.g. ~/.config/vite-plus/env).")
+    return actions, env
+
 @call_parse
 def ws_setup(
-    repo: str,  # Workspace repository: owner/repo or GitHub URL
-    dest: str,  # New workspace directory (must not exist)
-    python: str = "3.13",  # Python version for the workspace environment
-    workers: int = None,  # Parallel workers for the initial ws-sync; omit to use its default
+    repo: str = "",  # Workspace repository (owner/repo or GitHub URL) to clone; omit to check/configure an existing workspace
+    dest: str = "",  # New workspace directory (must not exist when `repo` is given)
+    workspace: str = "",  # Existing workspace root when `repo` is omitted; defaults to active venv parent
+    repos_file: str = "repos.txt",  # Repo list used to detect workspace requirements
+    python: str = "3.13",  # Python version for a new workspace environment
+    workers: int = None,  # Parallel workers for cloning and initial ws-sync; omit to use defaults
 ):
-    "Clone a workspace, create its environment, install fastws, and sync without changing the caller's environment."
-    root = Path(dest).expanduser().absolute()
-    if root.exists() or root.is_symlink(): raise SystemExit(f'Destination exists: {root}; use ws-sync for an existing workspace')
-    repo = _normalize_repo(repo)
-    root.parent.mkdir(parents=True, exist_ok=True)
-    Git(root.parent, raise_exc=True).clone(f'git@github.com:{repo}.git', str(root))
-    venv = root/'.venv'
-    bindir = venv/'bin'
-    env = dict(os.environ, VIRTUAL_ENV=str(venv), UV_PROJECT_ENVIRONMENT=str(venv),
-        UV_PROJECT=str(root), UV_WORKING_DIR=str(root), PATH=f'{bindir}{os.pathsep}{os.environ["PATH"]}')
-    subprocess.run(['uv', 'venv', '--python', python, str(venv)], cwd=root, env=env, check=True)
-    subprocess.run(['uv', 'pip', 'install', '--python', str(bindir/'python'), 'fastws-cli>=0.0.14'], cwd=root, env=env, check=True)
-    sync = [str(bindir/'ws-sync'), '--workspace', str(root)]
-    if workers: sync += ['--workers', str(workers)]
-    subprocess.run(sync, cwd=root, env=env, check=True)
-    print(f'Workspace ready: {root}\n\nsource {shlex.quote(str(bindir/"activate"))}\ncd {shlex.quote(str(root))}')
-    if (root/'aai-coding/SETUP.md').exists(): print('Then ask your coding agent to follow aai-coding/SETUP.md.')
+    "Bootstrap a new workspace, or check and complete missing toolchain and sccache setup on an existing workspace."
+    if repo:
+        if not dest: raise SystemExit("Destination directory is required when cloning a workspace repository.")
+        root = Path(dest).expanduser().absolute()
+        if root.exists() or root.is_symlink(): raise SystemExit(f'Destination exists: {root}; run bare `ws-setup` or `ws-sync` for an existing workspace')
+        repo = _normalize_repo(repo)
+        root.parent.mkdir(parents=True, exist_ok=True)
+        Git(root.parent, raise_exc=True).clone(f'git@github.com:{repo}.git', str(root))
+        venv = root/'.venv'
+        bindir = venv/'bin'
+        env = dict(os.environ, VIRTUAL_ENV=str(venv), UV_PROJECT_ENVIRONMENT=str(venv),
+            UV_PROJECT=str(root), UV_WORKING_DIR=str(root), PATH=f'{bindir}{os.pathsep}{os.environ["PATH"]}')
+        subprocess.run(['uv', 'venv', '--python', python, str(venv)], cwd=root, env=env, check=True)
+        subprocess.run(['uv', 'pip', 'install', '--python', str(bindir/'python'), 'fastws-cli>=0.0.14'], cwd=root, env=env, check=True)
+        clone = [str(bindir/'ws-clone'), '--repos-file', repos_file]
+        if workers: clone += ['--workers', str(workers)]
+        subprocess.run(clone, cwd=root, env=env, check=True)
+        _, env = _setup_tools(root, repos_file, env=env)
+        sync = [str(bindir/'ws-sync'), '--workspace', str(root), '--repos-file', repos_file]
+        if workers: sync += ['--workers', str(workers)]
+        subprocess.run(sync, cwd=root, env=env, check=True)
+        print(f'Workspace ready: {root}\n\nsource {shlex.quote(str(bindir/"activate"))}\ncd {shlex.quote(str(root))}')
+        if (root/'aai-coding/SETUP.md').exists(): print('Then ask your coding agent to follow aai-coding/SETUP.md.')
+        return
+    if dest: raise SystemExit(f'Unexpected destination without repo: {dest}; use --workspace to target an existing workspace')
+    root = _ws_root(workspace, repos_file)
+    actions, _ = _setup_tools(root, repos_file)
+    if actions: print("Setup completed: " + ", ".join(actions))
+    else: print(f"Workspace setup up to date: {root}")
 
 @call_parse
 async def ws_clone(
@@ -876,32 +971,165 @@ def _sync_cargo_patches(root: Path, root_dir=False) -> tuple[list[str], list[str
     added, removed = _entry_changes(before, after)
     return sorted(added), sorted(removed)
 
+_SCCACHE_AWS_PROFILE = "r2-sccache"
+
+def _sccache_config_path() -> Path:
+    if conf := os.environ.get("SCCACHE_CONF"): return Path(conf).expanduser()
+    if sys.platform == "darwin": return Path.home()/"Library/Application Support/Mozilla.sccache/config"
+    if os.name == "nt": return Path(os.environ.get("APPDATA", Path.home()/"AppData/Roaming"))/"Mozilla/sccache/config/config"
+    return Path(os.environ.get("XDG_CONFIG_HOME", Path.home()/".config"))/"sccache/config"
+
+def _sccache_disk_dir() -> Path:
+    if d := os.environ.get("SCCACHE_DIR"): return Path(d).expanduser()
+    if sys.platform == "darwin": return Path.home()/"Library/Caches/Mozilla.sccache"
+    if os.name == "nt": return Path(os.environ.get("LOCALAPPDATA", Path.home()/"AppData/Local"))/"Mozilla/sccache"
+    return Path(os.environ.get("XDG_CACHE_HOME", Path.home()/".cache"))/"sccache"
+
+def _aws_creds_path() -> Path:
+    return Path(os.environ.get("AWS_SHARED_CREDENTIALS_FILE", Path.home()/".aws/credentials")).expanduser()
+
+def _parse_sccache_r2(url: str) -> dict:
+    "Parse `SCCACHE_R2` (`https://[key:secret@]<acct>.r2.cloudflarestorage.com/<bucket>[/prefix][?rw_mode=READ_ONLY]`)."
+    u = urlsplit(url.strip())
+    if u.scheme not in ("http", "https") or not u.hostname:
+        raise SystemExit("Invalid SCCACHE_R2 URL: expected https://[key:secret@]<endpoint>/<bucket>")
+    parts = [p for p in u.path.strip("/").split("/") if p]
+    if not parts: raise SystemExit("Invalid SCCACHE_R2 URL: missing bucket name in path")
+    if (u.username is None) != (u.password is None):
+        raise SystemExit("Invalid SCCACHE_R2 URL: specify both access key and secret key, or neither")
+    endpoint = f"{u.scheme}://{u.hostname}" + (f":{u.port}" if u.port else "")
+    rw_mode = parse_qs(u.query).get("rw_mode", [None])[0]
+    access_key = unquote(u.username) if u.username is not None else None
+    secret_key = unquote(u.password) if u.password is not None else None
+    return dict(endpoint=endpoint, bucket=parts[0], key_prefix="/".join(parts[1:]),
+        use_ssl=(u.scheme == "https"), access_key=access_key, secret_key=secret_key, rw_mode=rw_mode)
+
+def _has_aws_profile(profile: str = _SCCACHE_AWS_PROFILE) -> bool:
+    path = _aws_creds_path()
+    if not path.exists(): return False
+    cp = configparser.RawConfigParser()
+    cp.read(path)
+    return cp.has_section(profile)
+
+def _sync_aws_profile(access_key: str, secret_key: str, profile: str = _SCCACHE_AWS_PROFILE) -> bool:
+    "Write or update `profile` in AWS credentials without disturbing other profiles; return True if changed."
+    path = _aws_creds_path()
+    cp = configparser.RawConfigParser()
+    if path.exists(): cp.read(path)
+    if cp.has_section(profile) and cp.get(profile, "aws_access_key_id", fallback=None) == access_key \
+            and cp.get(profile, "aws_secret_access_key", fallback=None) == secret_key: return False
+    if not cp.has_section(profile): cp.add_section(profile)
+    cp.set(profile, "aws_access_key_id", access_key)
+    cp.set(profile, "aws_secret_access_key", secret_key)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with path.open("w") as f: cp.write(f)
+    if os.name != "nt": path.chmod(0o600)
+    return True
+
+def _set_top_array(content: str, key: str, values: list[str]) -> str:
+    "Set or replace a top-level TOML array `key` before the first `[table]` header."
+    line = f"{key} = {_fmt_toml_val(values)}"
+    m_tbl = re.search(r"(?m)^[ \t]*\[", content)
+    preamble, rest = (content[:m_tbl.start()], content[m_tbl.start():]) if m_tbl else (content, "")
+    if m := re.search(rf"(?m)^{re.escape(key)}\s*=\s*\[", preamble):
+        arr_end = _find_array_end(preamble, m.end()-1)
+        preamble = preamble[:m.start()] + line + preamble[arr_end+1:]
+    else: preamble = (preamble.rstrip() + "\n" + line + "\n\n").lstrip("\n")
+    return preamble + rest
+
+def _sccache_uses_s3() -> bool:
+    path = _sccache_config_path()
+    if not path.exists(): return False
+    try: return "s3" in tomllib.loads(path.read_text()).get("cache", {})
+    except tomllib.TOMLDecodeError: return False
+
+def _render_sccache_config(root: Path, spec: dict, content: str) -> str:
+    "Return sccache TOML config with `root` in `basedirs`, multilevel `disk`+`s3`, and `[cache.s3]` from `spec`."
+    data = tomllib.loads(content) if content else {}
+    basedirs = list(data.get("basedirs", []))
+    ws_str = str(root.resolve())
+    if ws_str not in basedirs: basedirs.append(ws_str)
+    content = _set_top_array(content, "basedirs", basedirs)
+    if "multilevel" not in data.get("cache", {}):
+        content = _replace_table(content, "cache.multilevel", 'chain = ["disk", "s3"]\nwrite_error_policy = "l0"')
+    if "disk" not in data.get("cache", {}):
+        content = _replace_table(content, "cache.disk", f'dir = {json.dumps(str(_sccache_disk_dir()))}\nsize = 10737418240')
+    s3 = dict(data.get("cache", {}).get("s3", {}))
+    s3 |= dict(bucket=spec["bucket"], endpoint=spec["endpoint"], region="auto", use_ssl=spec["use_ssl"])
+    if spec["key_prefix"]: s3["key_prefix"] = spec["key_prefix"]
+    else: s3.pop("key_prefix", None)
+    if spec["rw_mode"]: s3["rw_mode"] = spec["rw_mode"]
+    elif not spec["access_key"]: s3["rw_mode"] = "READ_ONLY"
+    s3["no_credentials"] = not spec["access_key"]
+    content = _replace_table(content, "cache.s3", "\n".join(f"{_toml_key(k)} = {_fmt_toml_val(v)}" for k, v in s3.items()))
+    return content.strip() + "\n"
+
+def _sccache_r2_needs_setup(root: Path) -> bool:
+    url = os.environ.get("SCCACHE_R2", "").strip()
+    if not url: return False
+    try: spec = _parse_sccache_r2(url)
+    except SystemExit: return True
+    cfg_path = _sccache_config_path()
+    if not cfg_path.exists(): return True
+    try:
+        original = cfg_path.read_text()
+        if _render_sccache_config(root, spec, original) != original: return True
+    except tomllib.TOMLDecodeError: return True
+    return bool(spec["access_key"]) and not _has_aws_profile()
+
+def _sync_sccache_config(root: Path) -> bool:
+    "Configure sccache multilevel local+R2 caching and isolated AWS profile from `SCCACHE_R2`; return True if anything changed."
+    url = os.environ.get("SCCACHE_R2", "").strip()
+    if not url: return False
+    spec = _parse_sccache_r2(url)
+    changed = bool(spec["access_key"]) and _sync_aws_profile(spec["access_key"], spec["secret_key"])
+    cfg_path = _sccache_config_path()
+    original = cfg_path.read_text() if cfg_path.exists() else ""
+    new = _render_sccache_config(root, spec, original)
+    if new != original:
+        tomllib.loads(new)
+        cfg_path.parent.mkdir(parents=True, exist_ok=True)
+        cfg_path.write_text(new)
+        changed = True
+    return changed
+
 # The rustc wrapper that `_sync_cargo_wrapper` writes. It imports only `fastws.timelock`, by its file, so that each rustc call pays for little more than the interpreter's start.
 _RUSTC_LOCK = r"""#!{python} -IS
 # Written by ws-sync. Cargo runs each rustc call through this script, which holds the machine's timing lock shared until rustc ends (`fastws.timelock`){via}.
-import sys
+import os, sys
 sys.path.insert(0, {dir!r})
 from timelock import exec_shared
 INNER = {inner!r}  # The wrapper that each rustc call runs through inside the lock, kept by later syncs; None: rustc alone
+PROFILE = {profile!r}  # AWS profile for sccache R2 access when configured by ws-setup; None: leave AWS env alone
+if PROFILE:
+    os.environ["AWS_PROFILE"] = PROFILE
+    for _k in ("AWS_ACCESS_KEY_ID", "AWS_SECRET_ACCESS_KEY", "AWS_SESSION_TOKEN"): os.environ.pop(_k, None)
 exec_shared([INNER, *sys.argv[1:]] if INNER else sys.argv[1:])
 """
 
-def _sync_cargo_wrapper(root: Path):
+def _sync_cargo_wrapper(root: Path, env: dict = None):
     "Point the generated Cargo config's `rustc-wrapper` at `.cargo/rustc-lock`, written here, which runs each rustc call holding the machine's timing lock shared (`fastws.timelock`). Inside the lock it runs the wrapper that the config named before, where that's another tool's, or else sccache where it's installed. On Windows, where the lock does nothing, the config keeps another tool's wrapper, or else names sccache."
     config, script = root/".cargo"/"config.toml", root/".cargo"/"rustc-lock"
     content = config.read_text() if config.exists() else ""
     current = (tomllib.loads(content) if content else {}).get("build", {}).get("rustc-wrapper")
-    if not (sccache := shutil.which("sccache")):
-        print("⚠️  sccache not found; Rust builds won't use compiler caching.\n"
-              "Install it with: cargo install sccache --locked\nThen rerun ws-sync to enable it.")
+    path_env = (env or os.environ).get("PATH")
+    if not (sccache := shutil.which("sccache", path=path_env)):
+        print("⚠️  sccache not found; Rust builds won't use compiler caching. Run ws-setup to install it.")
+    elif _sccache_r2_needs_setup(root):
+        print("⚠️  SCCACHE_R2 is set, but sccache is not configured for it yet. Run ws-setup to configure it.")
     recorded = script.exists() and current == str(script) and re.search(r"(?m)^INNER = (.+?)  #", script.read_text())
     previous = ast.literal_eval(recorded[1]) if recorded else current
     inner = previous if previous not in (None, str(script)) else sccache
+    is_sccache = bool(inner) and Path(inner).stem == "sccache"
+    profile = _SCCACHE_AWS_PROFILE if (is_sccache and _sccache_uses_s3() and _has_aws_profile()) else None
     if os.name == "nt": wrapper = inner
     else:
         script.parent.mkdir(exist_ok=True)
-        script.write_text(_RUSTC_LOCK.format(python=sys.executable, dir=str(Path(__file__).parent), via=f", through {Path(inner).name}" if inner else "", inner=inner))
-        script.chmod(0o755)
+        rendered = _RUSTC_LOCK.format(python=sys.executable, dir=str(Path(__file__).parent),
+            via=f", through {Path(inner).name}" if inner else "", inner=inner, profile=profile)
+        if not script.exists() or script.read_text() != rendered:
+            script.write_text(rendered)
+            script.chmod(0o755)
         wrapper = str(script)
     if not wrapper or current == wrapper: return
     content = re.sub(r"(?m)^rustc-wrapper = .*\n", "", content)
@@ -919,6 +1147,14 @@ def _cargo_dep_tables(data, every=False):
     for target in data.get("target", {}).values():
         for name in names: yield target.get(name, {})
     if every: yield data.get("workspace", {}).get("dependencies", {})
+
+def _rustup_update(root: Path):
+    "Update the stable Rust toolchain when the workspace has crates, rustup is installed, and no root toolchain pin exists."
+    if not _crate_dirs(root) or not (rustup := shutil.which("rustup")): return
+    if any((root/f).exists() for f in ("rust-toolchain.toml", "rust-toolchain")): return
+    res = subprocess.run([rustup, "update", "stable"], capture_output=True, text=True)
+    if res.returncode: print(f"⚠️  rustup update stable failed\n{((res.stdout or '') + (res.stderr or '')).strip()}")
+    elif out := (res.stdout or "").strip(): print(out)
 
 def _cargo_update(root: Path, workers: int = 16):
     "Float each member crate's Cargo.lock to latest matching versions, in parallel; prints what moved."
@@ -1076,8 +1312,7 @@ def _js_graph(members: list[Path], wasm_pkgs: dict = None):
 def _check_rustup(wasm: bool = False):
     "Require rustup's compiler proxies, and optionally the `wasm32-unknown-unknown` target."
     if not (rustup := shutil.which("rustup")):
-        raise SystemExit("Rust-backed WebAssembly builds require rustup. Install it from https://rustup.rs, "
-            "select a stable toolchain with `rustup default stable`, then reopen your shell and rerun ws-sync.")
+        raise SystemExit("Rust-backed WebAssembly builds require rustup. Run ws-setup to install it.")
     for tool in "rustc","cargo":
         path = shutil.which(tool)
         if path and os.path.samefile(path, rustup): continue
@@ -1088,20 +1323,17 @@ def _check_rustup(wasm: bool = False):
     if wasm:
         installed = subprocess.run([rustup, "target", "list", "--installed"], capture_output=True, text=True, check=True).stdout.splitlines()
         if "wasm32-unknown-unknown" not in installed:
-            raise SystemExit("WebAssembly builds require the wasm32-unknown-unknown Rust target. "
-                "Install it with: rustup target add wasm32-unknown-unknown")
+            raise SystemExit("WebAssembly builds require the wasm32-unknown-unknown Rust target. Run ws-setup to install it.")
 
 def _check_vp():
     "Require Vite+ (`vp`) and its managed `node` and `pnpm` shims on PATH."
     if not (vp := shutil.which("vp")):
-        raise SystemExit("JavaScript workspaces require Vite+ (vp). Install it from https://viteplus.dev "
-            "(`curl -fsSL https://vite.plus | bash`), enable managed Node.js and package-manager shims when prompted, "
-            "then reopen your shell and rerun ws-sync.")
+        raise SystemExit("JavaScript workspaces require Vite+ (vp). Run ws-setup to install it.")
     for tool in "node", "pnpm":
         path = shutil.which(tool)
         if path and os.path.samefile(path, vp): continue
         raise SystemExit(f"JavaScript workspaces require Vite+-managed {tool}, but {tool} resolves to {path or 'nothing'}. "
-            "Enable Vite+ managed mode (`vp env on`) and put Vite+'s bin directory first on PATH "
+            "Run ws-setup to enable Vite+ managed shims, and put Vite+'s bin directory first on PATH "
             "(normally via `~/.config/vite-plus/env`), then open a new shell and rerun ws-sync.")
 
 def _vp_toolchain() -> dict[str, str]:
@@ -1147,7 +1379,7 @@ async def ws_sync(
     upgrade: bool = False,  # Force the once-daily dependency upgrade pass
     build_workers: int = os.cpu_count() or 1,  # Concurrent projects per build phase; defaults to CPU count
 ):
-    "Pull the workspace baseline, clone missing shared/local repos, then pull projects and sync; upgrade Python deps daily and Cargo deps weekly."
+    "Pull the workspace baseline, clone missing shared/local repos, then pull projects and sync; upgrade Python deps daily and Rust toolchain/Cargo deps weekly."
     with _cli_errors():
         root = _ws_root(workspace, repos_file, pyproject_file, template_file)
         repos_path = _resolve_path(root, repos_file)
@@ -1175,7 +1407,7 @@ async def ws_sync(
             _repo_extras(root, entries))
         if missing_projects: print(f"Added workspace projects: {', '.join(missing_projects)}")
         projects = _build_projects(root, repos_file)
-        _sync_build_isolation(pyproject_path, projects)
+        _sync_build_backend(pyproject_path, projects)
     
         added_p, removed_p = cargo_setup(root)
         if added_p: print(f"Cargo patches added: {', '.join(added_p)}")
@@ -1197,7 +1429,9 @@ async def ws_sync(
             return
         up = upgrade or _should_upgrade(root)
         cargo_up = upgrade or _should_upgrade(root, max_age=7*86400, name="fastws-cargo-upgraded")
-        if cargo_up: _cargo_update(root, workers=workers)
+        if cargo_up:
+            _rustup_update(root)
+            _cargo_update(root, workers=workers)
         subprocess.run(["uv", "sync", "-U"] if up else ["uv", "sync"], check=True, cwd=root)
         _write_pytest_pth(root)
         from .cargo import develop

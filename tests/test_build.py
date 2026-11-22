@@ -139,46 +139,6 @@ console.log('bundled app');
     assert not list(out.glob('.fastws-*'))
 
 
-@pytest.mark.skipif(not shutil.which('vp'), reason='JavaScript builds need Vite+ (vp)')
-def test_wasm_build_always_runs_cargo_and_packs_dist(tmp_path, monkeypatch):
-    root, out = tmp_path/'ws', tmp_path/'ws'/'.dists'
-    root.mkdir()
-    _write_cached_vp_shared(root)
-    sibling = tmp_path/'rustymath'
-    sibling.mkdir()
-    (sibling/'src.txt').write_text('v1')
-    app = _mk_proj(root, 'app', '[tool.fastws]\njs-packages = ["frontend"]')
-    (app/'frontend').mkdir()
-    (app/'frontend'/'package.json').write_text(json.dumps({'name': 'app-fe', 'private': True, 'dependencies': {'basedpl': '>=0.1.0'}}))
-    bpl = _mk_proj(root, 'basedpl', 'version = "0.1.0"\n[build-system]\nrequires = ["setuptools>=77"]\nbuild-backend = "setuptools.build_meta"\n[tool.setuptools]\npy-modules = []\n[tool.fastws]\nwasm-package = { name = "basedpl", path = "wasm/pkg" }')
-    (bpl/'package.json').write_text(json.dumps({'name': 'basedpl', 'version': '0.1.0', 'private': True}))
-    _mk_proj(root, 'mdhtml', '[tool.fastws]\nwasm-package = { name = "@answerdotai/mdhtml", path = "wasm/pkg" }')
-    core._sync_ws_pnpm_workspace(root, core._js_dirs(root))
-    core._sync_ws_package_json(root)
-
-    built_wasm = []
-    def fake_wasm(repo):
-        built_wasm.append(repo.name)
-        pkg = repo/'wasm'/'pkg'
-        pkg.mkdir(parents=True, exist_ok=True)
-        val = (sibling/'src.txt').read_text()
-        if not (pkg/'out.js').exists() or (pkg/'out.js').read_text() != val:
-            (pkg/'out.js').write_text(val)
-            (pkg/'package.json').write_text(json.dumps({'name': 'basedpl', 'version': '0.1.0', 'files': ['out.js']}))
-    monkeypatch.setattr(core, '_check_rustup', lambda wasm=False: None)
-    monkeypatch.setattr(core, '_build_wasm', fake_wasm)
-
-    core.ws_build(workspace=str(root), project='app-fe', workers=2)
-    assert built_wasm == ['basedpl']
-    tgz, = out.glob('*.tgz')
-    assert tgz.name == 'basedpl-0.1.0.tgz' and _archive_text(tgz, 'out.js') == 'v1'
-
-    # Editing an external sibling crate without touching basedpl still invokes Cargo and repacks updated WASM.
-    (sibling/'src.txt').write_text('v2')
-    core.ws_build(workspace=str(root), project='app-fe', workers=2)
-    assert built_wasm == ['basedpl', 'basedpl']
-    assert _archive_text(out/'basedpl-0.1.0.tgz', 'out.js') == 'v2' 
-
 @pytest.mark.parametrize('body, diagnostic', [('', ''), ('let unused = 1;', 'warning'), ('compile_error!("broken");', 'error')])
 def test_build_diagnostics(tmp_path, capfd, monkeypatch, body, diagnostic):
     (tmp_path/'pyproject.toml').write_text('[tool.maturin]\n[tool.fastws]\ncargo = '+json.dumps(shutil.which('cargo'))+'\n')

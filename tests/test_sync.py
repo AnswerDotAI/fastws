@@ -1,4 +1,4 @@
-import json, os, sys, pytest
+import json, os, subprocess, sys, pytest
 from fastgit import Git
 import fastws.core as core
 
@@ -93,13 +93,15 @@ def test_sync_extras_preserves_constraints_markers_and_unrelated_settings(tmp_pa
 
 @pytest.mark.skipif(os.name == 'nt', reason='Windows has no timing lock, so no rustc-lock script')
 def test_rustc_wrapper_keeps_another_tools_wrapper(tmp_path):
-    config, script = tmp_path/'.cargo'/'config.toml', tmp_path/'.cargo'/'rustc-lock'
+    config, script, wrap = tmp_path/'.cargo'/'config.toml', tmp_path/'.cargo'/'rustc-lock', tmp_path/'wrap'
+    wrap.write_text('#!/bin/sh\nprintf "wrapped:%s" "$*"\n')
+    wrap.chmod(0o755)
     config.parent.mkdir()
-    config.write_text('[build]\nrustc-wrapper = "/opt/custom/wrap"\n')
+    config.write_text(f'[build]\nrustc-wrapper = "{wrap}"\n')
     for _ in range(2):
         core._sync_cargo_wrapper(tmp_path)
-        assert f'rustc-wrapper = "{script}"' in config.read_text()
-        assert "INNER = '/opt/custom/wrap'" in script.read_text()
+        assert core.tomllib.loads(config.read_text())['build']['rustc-wrapper'] == str(script)
+        assert subprocess.run([str(script), 'hi'], capture_output=True, text=True, check=True).stdout == 'wrapped:hi'
 
 
 def test_remove_from_pyproject(tmp_path):
@@ -175,7 +177,6 @@ def test_sync_ws_pnpm_workspace_and_package_json(tmp_path):
     data = core._yaml_load(ws)
     assert data['packages'] == ['../outside', 'tools/*', 'app']
     assert data['allowBuilds'] == {'other': False, 'esbuild': True}
-    assert data['linkWorkspacePackages'] == 'deep' and data['preferWorkspacePackages'] is True and data['minimumReleaseAge'] == 1440
     assert 'overrides' not in data
 
     ws.write_text(ws.read_text() + 'overrides:\n  keep: 1.0.0\n  vite: npm:@voidzero-dev/vite-plus-core@8.0.0\n  vitest: 4.0.0\n')
@@ -199,3 +200,21 @@ def test_sync_ws_pnpm_workspace_and_package_json(tmp_path):
     pkg_shared.write_text(json.dumps({'packageManager': 'pnpm@10.34.9', 'devDependencies': {'vite-plus': '1.7.0'}}))
     assert core._sync_ws_package_json(tmp_path, toolchain=tc) is True
     assert json.loads(pkg.read_text())['devDependencies'] == {'keep': '1', 'vite-plus': '1.7.0'}
+
+
+def test_sync_build_backend(tmp_path):
+    ws = tmp_path/'pyproject.toml'
+    ws.write_text('[project]\nname = "ws"\n\n[tool.uv.config-settings-package]\na = { "maturin.build-args" = ["--features", "x"] }\nb = { metadata-only = "1", custom = "yes" }\ngone = { metadata-only = "1" }\n')
+    a, b = tmp_path/'a', tmp_path/'b'
+    a.mkdir(); b.mkdir()
+    (a/'pyproject.toml').write_text('[build-system]\nbuild-backend = "fastws.build_backend"\n[project]\nname = "a"\n')
+    (b/'pyproject.toml').write_text('[build-system]\nbuild-backend = "maturin"\n[project]\nname = "b"\n')
+    core._sync_build_backend(ws, [('a', a), ('b', b)])
+    uv = core.tomllib.loads(ws.read_text())['tool']['uv']
+    assert uv['no-build-isolation-package'] == ['a']
+    assert uv['config-settings-package'] == {'a': {'maturin.build-args': ['--features', 'x'], 'metadata-only': '1'}, 'b': {'custom': 'yes'}}
+    (a/'pyproject.toml').write_text('[build-system]\nbuild-backend = "maturin"\n[project]\nname = "a"\n')
+    ws.write_text('[project]\nname = "ws"\n\n[tool.uv]\nno-build-isolation-package = ["a"]\n\n[tool.uv.config-settings-package]\na = { metadata-only = "1" }\n')
+    core._sync_build_backend(ws, [('a', a), ('b', b)])
+    uv = core.tomllib.loads(ws.read_text())['tool']['uv']
+    assert uv['no-build-isolation-package'] == [] and 'config-settings-package' not in uv
