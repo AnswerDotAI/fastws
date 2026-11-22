@@ -1,4 +1,4 @@
-import fcntl, os, subprocess, sys, threading, pytest
+import fcntl, os, subprocess, sys, threading
 from fastws.procs import JOB_ENV, kill_group
 
 
@@ -24,7 +24,7 @@ print('job survived inner timeout', flush=True)
 time.sleep(60)
 '''
     with subprocess.Popen([sys.executable, '-c', job], start_new_session=True, env=os.environ | {JOB_ENV: '1'},
-                          stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True) as p:
+        stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True) as p:
         lines, survived = [], threading.Event()
         def read():
             for line in p.stdout:

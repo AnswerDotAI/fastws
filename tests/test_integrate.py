@@ -11,9 +11,12 @@ def test_snapshot_takes_the_working_tree_and_leaves_head_and_index(tmp_path):
     git(tmp_path, "init", "-q")
     (tmp_path/".gitignore").write_text("ignored\n")
     (tmp_path/"kept").write_text("old")
-    git(tmp_path, "add", "-A"); git(tmp_path, "-c", "user.name=t", "-c", "user.email=t@t", "commit", "-qm", "base")
+    git(tmp_path, "add", "-A")
+    git(tmp_path, "-c", "user.name=t", "-c", "user.email=t@t", "commit", "-qm", "base")
     head = git(tmp_path, "rev-parse", "HEAD")
-    (tmp_path/"kept").write_text("new"); (tmp_path/"untracked").write_text("u"); (tmp_path/"ignored").write_text("i")
+    (tmp_path/"kept").write_text("new")
+    (tmp_path/"untracked").write_text("u")
+    (tmp_path/"ignored").write_text("i")
     commit = snapshot(tmp_path)
     assert git(tmp_path, "show", f"{commit}:kept") == "new"
     assert git(tmp_path, "show", f"{commit}:untracked") == "u"

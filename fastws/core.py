@@ -317,7 +317,7 @@ members = ["./*"]
     return True
 
 def _sync_ws_pyproject(pyproject_path: Path, template_path: Path, projects: list[str], externals: list[tuple] = None,
-    extras: dict[str, set[str]] = None) -> list[str]:
+    extras: dict[str, set] = None) -> list[str]:
     if not pyproject_path.exists():
         if template_path.exists(): shutil.copyfile(template_path, pyproject_path)
         else: _init_ws_pyproject(pyproject_path)
@@ -348,7 +348,7 @@ def _sync_ws_pyproject(pyproject_path: Path, template_path: Path, projects: list
     if content != original: pyproject_path.write_text(content)
     return missing + [n for n,_ in ext_missing]
 
-def _sync_build_backend(pyproject_path: Path, projects: list[tuple[str, Path]]):
+def _sync_build_backend(pyproject_path: Path, projects: list[tuple]):
     "Regenerate uv's build-isolation and metadata-only config settings for projects using the fastws backend."
     from .build_backend import METADATA_ONLY
     content = pyproject_path.read_text()
@@ -373,8 +373,7 @@ def _sync_build_backend(pyproject_path: Path, projects: list[tuple[str, Path]]):
         if new_cfg:
             lines = "\n".join(f"{_toml_key(pkg)} = {_fmt_source(new_cfg[pkg])}" for pkg in sorted(new_cfg))
             content = _replace_table(content, 'tool.uv.config-settings-package', lines)
-        elif span := _table_span(content, 'tool.uv.config-settings-package'):
-            content = content[:span[0]] + content[span[1]:]
+        elif span := _table_span(content, 'tool.uv.config-settings-package'): content = content[:span[0]] + content[span[1]:]
     tomllib.loads(content)
     pyproject_path.write_text(content)
 
@@ -790,8 +789,7 @@ def ws_build(
     artifacts = [('sdist', n, d) for n,d in py]
     artifacts += [('npm', p['name'], d) for d,p in packages.items() if p.get('name') and p.get('version') and not p.get('private')]
     artifacts += [('npm', p['name'], d) for d,p in wasm_dists.items() if p.get('name') and p.get('version') and not p.get('private')]
-    js_closure = {d: _dependency_dirs(d, js_graph)
-        for d,p in packages.items() if p.get('scripts', {}).get('build')}
+    js_closure = {d: _dependency_dirs(d, js_graph) for d, p in packages.items() if p.get('scripts', {}).get('build')}
     for _, d in py:
         if nested := [j for j in _js_package_specs(d) if j in js_closure]: js_closure[d] = {d}.union(*(js_closure[j] for j in nested))
     lock = root/'pnpm-lock.yaml'
@@ -879,8 +877,8 @@ def _local_crates(root: Path) -> list[tuple[dict, Path]]:
 def _registry_requirements(root: Path) -> set[str]:
     "Packages that some manifest under `root` requires from crates.io: a version with no `path`, `git`, `registry` or `workspace` key"
     return {spec.get("package", name) if isinstance(spec, dict) else name
-            for crate in _crate_dirs(root) for data, _ in _crate_manifests(crate) for deps in _cargo_dep_tables(data, every=True)
-            for name, spec in deps.items() if isinstance(spec, str) or isinstance(spec, dict) and not {"path", "git", "registry", "workspace"} & spec.keys()}
+        for crate in _crate_dirs(root) for data, _ in _crate_manifests(crate) for deps in _cargo_dep_tables(data, every=True)
+        for name, spec in deps.items() if isinstance(spec, str) or isinstance(spec, dict) and not {"path", "git", "registry", "workspace"} & spec.keys()}
 
 def _git_dep_tables(root: Path, crates: dict[str, Path]) -> dict[str, dict[str, Path]]:
     "Git URL -> {package: local dir} for members' git deps that name a local crate"
@@ -985,8 +983,7 @@ def _sccache_disk_dir() -> Path:
     if os.name == "nt": return Path(os.environ.get("LOCALAPPDATA", Path.home()/"AppData/Local"))/"Mozilla/sccache"
     return Path(os.environ.get("XDG_CACHE_HOME", Path.home()/".cache"))/"sccache"
 
-def _aws_creds_path() -> Path:
-    return Path(os.environ.get("AWS_SHARED_CREDENTIALS_FILE", Path.home()/".aws/credentials")).expanduser()
+def _aws_creds_path() -> Path: return Path(os.environ.get("AWS_SHARED_CREDENTIALS_FILE", Path.home()/".aws/credentials")).expanduser()
 
 def _parse_sccache_r2(url: str) -> dict:
     "Parse `SCCACHE_R2` (`https://[key:secret@]<acct>.r2.cloudflarestorage.com/<bucket>[/prefix][?rw_mode=READ_ONLY]`)."
@@ -1289,8 +1286,7 @@ def _sync_ws_package_json(root: Path, toolchain: dict[str, str] = None) -> bool:
     before = json.dumps(data)
     data["private"] = True
     data.pop("workspaces", None)
-    if toolchain and (vp_v := toolchain.get("vite-plus")):
-        data["devDependencies"] = {**data.get("devDependencies", {}), "vite-plus": vp_v}
+    if toolchain and (vp_v := toolchain.get("vite-plus")): data["devDependencies"] = {**data.get("devDependencies", {}), "vite-plus": vp_v}
     shared = root/"package.json.shared"
     if shared.exists(): _merge_shared(data, json.loads(shared.read_text()))
     if json.dumps(data) == before: return False
@@ -1316,10 +1312,7 @@ def _check_rustup(wasm: bool = False):
     for tool in "rustc","cargo":
         path = shutil.which(tool)
         if path and os.path.samefile(path, rustup): continue
-        raise SystemExit(f"Rust-backed WebAssembly builds require rustup-managed Rust, but {tool} resolves to {path or 'nothing'}. "
-            "Put rustup's bin directory first on PATH after Homebrew or other toolchain setup in your shell profile "
-            '(normally: export PATH="$HOME/.cargo/bin:$PATH"; use $CARGO_HOME/bin when customized). '
-            "Homebrew Rust can remain installed. Open a new shell and rerun ws-sync.")
+        raise SystemExit(f"""Rust-backed WebAssembly builds require rustup-managed Rust, but {tool} resolves to {path or 'nothing'}. Put rustup's bin directory first on PATH after Homebrew or other toolchain setup in your shell profile (normally: export PATH="$HOME/.cargo/bin:$PATH"; use $CARGO_HOME/bin when customized). Homebrew Rust can remain installed. Open a new shell and rerun ws-sync.""")
     if wasm:
         installed = subprocess.run([rustup, "target", "list", "--installed"], capture_output=True, text=True, check=True).stdout.splitlines()
         if "wasm32-unknown-unknown" not in installed:
@@ -1327,14 +1320,11 @@ def _check_rustup(wasm: bool = False):
 
 def _check_vp():
     "Require Vite+ (`vp`) and its managed `node` and `pnpm` shims on PATH."
-    if not (vp := shutil.which("vp")):
-        raise SystemExit("JavaScript workspaces require Vite+ (vp). Run ws-setup to install it.")
+    if not (vp := shutil.which("vp")): raise SystemExit("JavaScript workspaces require Vite+ (vp). Run ws-setup to install it.")
     for tool in "node", "pnpm":
         path = shutil.which(tool)
         if path and os.path.samefile(path, vp): continue
-        raise SystemExit(f"JavaScript workspaces require Vite+-managed {tool}, but {tool} resolves to {path or 'nothing'}. "
-            "Run ws-setup to enable Vite+ managed shims, and put Vite+'s bin directory first on PATH "
-            "(normally via `~/.config/vite-plus/env`), then open a new shell and rerun ws-sync.")
+        raise SystemExit(f"JavaScript workspaces require Vite+-managed {tool}, but {tool} resolves to {path or 'nothing'}. Run ws-setup to enable Vite+ managed shims, and put Vite+'s bin directory first on PATH (normally via `~/.config/vite-plus/env`), then open a new shell and rerun ws-sync.")
 
 def _vp_toolchain() -> dict[str, str]:
     "Versions of `vite-plus`, `vite-plus-core`, and `vitest` from the global `vp` CLI."

@@ -1,4 +1,4 @@
-import json, os, subprocess, sys, pytest
+import json, os, subprocess, pytest
 from fastgit import Git
 import fastws.core as core
 
@@ -80,8 +80,12 @@ def test_invalid_repo_extras(entry):
 
 def test_sync_extras_preserves_constraints_markers_and_unrelated_settings(tmp_path):
     pyproject = tmp_path/'pyproject.toml'
-    pyproject.write_text('[project]\nname = "ws"\ndependencies = [\'My_Pkg[old]>=1; python_version >= "3.10"\', "other[keep]"]\n'
-        '[tool.uv.sources]\nMy_Pkg = { path = "../somewhere", editable = true }\n')
+    pyproject.write_text('''[project]
+name = "ws"
+dependencies = ['My_Pkg[old]>=1; python_version >= "3.10"', "other[keep]"]
+[tool.uv.sources]
+My_Pkg = { path = "../somewhere", editable = true }
+''')
     for extras in ({'dev', 'test'}, set()):
         core._sync_ws_pyproject(pyproject, tmp_path/'pyproject.tmpl', ['my-pkg'], extras={'my-pkg': extras})
         data = core.tomllib.loads(pyproject.read_text())
@@ -140,18 +144,42 @@ def test_ws_remove_refuses_unsafe_repos(tmp_path):
 def test_sync_cargo_patches_generates_and_preserves(tmp_path):
     (tmp_path/'.cargo').mkdir()
     config = tmp_path/'.cargo'/'config.toml'
-    config.write_text('[term]\nquiet = true\n\n[patch.crates-io]\n'
-        f'foreign = {{ path = "/elsewhere/foreign" }}\ngone = {{ path = "{tmp_path}/gone" }}\n')
+    config.write_text(f'''[term]
+quiet = true
+
+[patch.crates-io]
+foreign = {{ path = "/elsewhere/foreign" }}
+gone = {{ path = "{tmp_path}/gone" }}
+''')
     config.write_text(core._replace_table(config.read_text(), 'unstable', 'checksum-freshness = true'))
     crate1, helper = tmp_path/'crate1', tmp_path/'helper'
-    crate1.mkdir(); helper.mkdir()
-    (crate1/'Cargo.toml').write_text('[package]\nname = "crate1"\nversion = "0.1.0"\n\n[dependencies]\nfamily = { git = "https://example.com/family" }\n'
-        '\n[dev-dependencies]\nfamily-sub = { version = "0.1" }\n')
+    crate1.mkdir()
+    helper.mkdir()
+    (crate1/'Cargo.toml').write_text('''[package]
+name = "crate1"
+version = "0.1.0"
+
+[dependencies]
+family = { git = "https://example.com/family" }
+
+[dev-dependencies]
+family-sub = { version = "0.1" }
+''')
     (helper/'Cargo.toml').write_text('[package]\nname = "helper"\nversion = "0.1.0"\n')
     family = tmp_path/'family'
     (family/'sub').mkdir(parents=True)
-    (family/'Cargo.toml').write_text('[package]\nname = "family"\nversion = "0.1.0"\npublish = false\n\n[workspace]\nmembers = ["sub"]\n'
-        '\n[workspace.dependencies]\nhelper = "0.1"\ncrate1 = { path = "../crate1", version = "0.1" }\n')
+    (family/'Cargo.toml').write_text('''[package]
+name = "family"
+version = "0.1.0"
+publish = false
+
+[workspace]
+members = ["sub"]
+
+[workspace.dependencies]
+helper = "0.1"
+crate1 = { path = "../crate1", version = "0.1" }
+''')
     (family/'sub'/'Cargo.toml').write_text('[package]\nname = "family-sub"\nversion = "0.1.0"\n')
 
     added, removed = core._sync_cargo_patches(tmp_path, root_dir=True)
@@ -186,10 +214,10 @@ def test_sync_ws_pnpm_workspace_and_package_json(tmp_path):
 
     ws_shared.write_text('allowBuilds:\n  esbuild: true\noverrides:\n  vite: npm:@voidzero-dev/vite-plus-core@8.3.8000\n  vitest: 5.1.0\n')
     core._sync_ws_pnpm_workspace(tmp_path, [tmp_path/'app'], toolchain=tc)
-    assert core._yaml_load(ws)['overrides'] == {'keep': '1.0.0', 'vite': 'npm:@voidzero-dev/vite-plus-core@8.3.8000', 'vitest': '5.1.0'}
+    assert core._yaml_load(ws)['overrides'] == dict(keep='1.0.0', vite='npm:@voidzero-dev/vite-plus-core@8.3.8000', vitest='5.1.0')
 
     pkg, pkg_shared = tmp_path/'package.json', tmp_path/'package.json.shared'
-    pkg.write_text(json.dumps({'name': 'local', 'workspaces': ['stale'], 'devDependencies': {'keep': '1'}}))
+    pkg.write_text(json.dumps(dict(name='local', workspaces=['stale'], devDependencies={'keep': '1'})))
     pkg_shared.write_text(json.dumps({'packageManager': 'pnpm@10.34.9'}))
     assert core._sync_ws_package_json(tmp_path, toolchain=tc) is True
     out = json.loads(pkg.read_text())
@@ -206,7 +234,8 @@ def test_sync_build_backend(tmp_path):
     ws = tmp_path/'pyproject.toml'
     ws.write_text('[project]\nname = "ws"\n\n[tool.uv.config-settings-package]\na = { "maturin.build-args" = ["--features", "x"] }\nb = { metadata-only = "1", custom = "yes" }\ngone = { metadata-only = "1" }\n')
     a, b = tmp_path/'a', tmp_path/'b'
-    a.mkdir(); b.mkdir()
+    a.mkdir()
+    b.mkdir()
     (a/'pyproject.toml').write_text('[build-system]\nbuild-backend = "fastws.build_backend"\n[project]\nname = "a"\n')
     (b/'pyproject.toml').write_text('[build-system]\nbuild-backend = "maturin"\n[project]\nname = "b"\n')
     core._sync_build_backend(ws, [('a', a), ('b', b)])

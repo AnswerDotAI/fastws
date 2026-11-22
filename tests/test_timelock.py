@@ -13,7 +13,8 @@ def test_shared_hold_outlives_other_thread(tmp_path, monkeypatch):
     t = threading.Thread(target=hold, daemon=True)
     try:
         with timelock.timing_lock():
-            t.start(); assert held.wait(3)
+            t.start()
+            assert held.wait(3)
         with open(timelock.LOCK) as f, pytest.raises(BlockingIOError): fcntl.flock(f, fcntl.LOCK_EX | fcntl.LOCK_NB)
     finally:
         release.set()

@@ -20,8 +20,7 @@ def settings(root):
     return tomllib.loads((Path(root).expanduser()/'pyproject.toml').read_text()).get('tool', {})
 
 
-def _dev_profile(root):
-    return settings(root).get('fastws', {}).get('dev-profile', 'test') if (root/'pyproject.toml').exists() else 'test'
+def _dev_profile(root): return settings(root).get('fastws', {}).get('dev-profile', 'test') if (root/'pyproject.toml').exists() else 'test'
 
 
 def _cargo_command(*args, env=None):
@@ -109,8 +108,8 @@ class Suite:
             elif in_failures and (m := _FAILURE.match(line)): current = failures.setdefault(m[1], [])
             elif current is not None: current.append(line)
         return cls(name, '\n'.join(lines), {m[1]: m[2] for l in lines if (m := _TEST.match(l))},
-                   {k: '\n'.join(v).strip('\n') for k,v in failures.items()},
-                   next((l for l in lines if l.startswith('test result: ')), ''), bool(returncode), timed_out)
+            {k: '\n'.join(v).strip('\n') for k,v in failures.items()},
+            next((l for l in lines if l.startswith('test result: ')), ''), bool(returncode), timed_out)
 
     def __str__(self):
         n = Counter(self.tests.values())
@@ -310,8 +309,7 @@ def _maturin_flags(target, env):
     target = target or env.get('CARGO_BUILD_TARGET')
     if not (target.endswith('-apple-darwin') if target else sys.platform == 'darwin'): return [], None
     link_args = ['link-arg=-undefined', 'link-arg=dynamic_lookup']
-    if 'CARGO_ENCODED_RUSTFLAGS' in env:
-        flags = env['CARGO_ENCODED_RUSTFLAGS'].split('\x1f') if env['CARGO_ENCODED_RUSTFLAGS'] else []
+    if 'CARGO_ENCODED_RUSTFLAGS' in env: flags = env['CARGO_ENCODED_RUSTFLAGS'].split('\x1f') if env['CARGO_ENCODED_RUSTFLAGS'] else []
     elif 'RUSTFLAGS' in env: flags = env['RUSTFLAGS'].split()
     else:
         flags = [arg for flag in link_args for arg in ('-C', flag)]
@@ -341,8 +339,7 @@ def build(
     if binaries: cmd.append('--bins')
     if profile := profile or cfg.get('profile'): cmd += ['--profile', profile]
     if target: cmd += ['--target', target]
-    if features := features or cfg.get('features'):
-        cmd += ['--features', features if isinstance(features, str) else ','.join(features)]
+    if features := features or cfg.get('features'): cmd += ['--features', features if isinstance(features, str) else ','.join(features)]
     for flag, active in [('all-features', all_features), ('no-default-features', no_default_features)]:
         if active or cfg.get(flag): cmd.append('--' + flag)
     extra, env = _maturin_flags(target, os.environ) if for_maturin else ([], None)

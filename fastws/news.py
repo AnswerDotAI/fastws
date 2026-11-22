@@ -89,8 +89,7 @@ async def _repo_news(entry, since, until, commits, model, max_chars):
     return f'## {name}\n\n{info}\n\n{summary}\n'
 
 def _save_checkpoint(path, state):
-    with tempfile.NamedTemporaryFile(mode='w', dir=path.parent, delete=False) as f:
-        json.dump(state, f, indent=2)
+    with tempfile.NamedTemporaryFile(mode='w', dir=path.parent, delete=False) as f: json.dump(state, f, indent=2)
     Path(f.name).replace(path)
 
 @call_parse(pos=['project'])

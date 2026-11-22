@@ -41,11 +41,10 @@ def build_editable(wheel_directory, config_settings=None, metadata_directory=Non
         tag = next(line.removeprefix('Tag: ') for line in (info/'WHEEL').read_text().splitlines() if line.startswith('Tag: '))
         files = {p.relative_to(info.parent).as_posix(): p.read_bytes() for p in info.rglob('*') if p.is_file() and p != info/'RECORD'}
         root = Path.cwd()
-        if py_src := settings(root)['maturin'].get('python-source'):
-            files[f'{name}.pth'] = f'{(root/py_src).resolve()}\n'.encode()
+        if py_src := settings(root)['maturin'].get('python-source'): files[f'{name}.pth'] = f'{(root/py_src).resolve()}\n'.encode()
         record = f'{info.name}/RECORD'
         rows = [(path, 'sha256=' + base64.urlsafe_b64encode(hashlib.sha256(data).digest()).rstrip(b'=').decode(), len(data))
-                for path, data in files.items()]
+            for path, data in files.items()]
         buffer = io.StringIO()
         csv.writer(buffer).writerows([*rows, (record, '', '')])
         files[record] = buffer.getvalue().encode()

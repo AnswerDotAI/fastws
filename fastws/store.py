@@ -55,8 +55,7 @@ def _blob(path):
 def dep_files(artifact):
     "The files that Cargo's dep-info lists for `artifact`, the `.d` file beside it, with the files under each directory it lists, such as one that a build script watches."
     deps = re.split(r'(?<!\\)\s+', Path(artifact).with_suffix('.d').read_text().split(': ', 1)[1].strip())
-    for p in (Path(d.replace('\\ ', ' ')) for d in deps):
-        yield from (sorted(f for f in p.rglob('*') if f.is_file()) if p.is_dir() else [p])
+    for p in (Path(d.replace('\\ ', ' ')) for d in deps): yield from (sorted(f for f in p.rglob('*') if f.is_file()) if p.is_dir() else [p])
 
 
 def _kept(d):

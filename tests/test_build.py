@@ -8,7 +8,7 @@ def _mk_proj(root, name, extra=''):
     d.mkdir()
     (d/'pyproject.toml').write_text(fr'''[project]
 name = "{name}"
-{extra}
+        {extra}
 ''')
     return d
 
@@ -56,10 +56,8 @@ def _write_cached_vp_shared(root):
     vp = Path(shutil.which('vp')).resolve().parent.parent
     pm = json.loads((vp/'package.json').read_text())['packageManager']
     node_vers = sorted(p.name for p in (vp.parent/'js_runtime'/'node').iterdir() if p.is_dir())
-    (root/'package.json.shared').write_text(json.dumps({
-        'packageManager': pm,
-        'devEngines': {'runtime': {'name': 'node', 'version': node_vers[-1]}},
-    }))
+    (root / 'package.json.shared').write_text(json.dumps({'packageManager': pm,
+        'devEngines': {'runtime': {'name': 'node', 'version': node_vers[-1]}}}))
 
 
 
@@ -101,13 +99,12 @@ const version = fs.readFileSync('../pnpm-lock.yaml', 'utf8').match(/theme@([^\s:
 fs.writeFileSync('dist/style.txt', fs.readFileSync('../styles/generated.txt', 'utf8') + ':' + version);
 console.log('bundled app');
 ''')
-    style_pkg = {'name':'@example/styles', 'version':'0.1.0', 'files':['generated.txt'], 'scripts':{'build':'node build.js'}}
+    style_pkg = dict(name='@example/styles', version='0.1.0', files=['generated.txt'], scripts={'build':'node build.js'})
     (styles/'package.json').write_text(json.dumps(style_pkg))
-    (app/'package.json').write_text(json.dumps({'name':'@example/app', 'version':'0.1.0', 'files':['dist'],
-        'dependencies':{'@example/styles':'^0.1.0'}, 'scripts':{'build':'node build.js'}}))
+    (app/'package.json').write_text(json.dumps(dict(name='@example/app', version='0.1.0', files=['dist'], dependencies={'@example/styles':'^0.1.0'}, scripts={'build':'node build.js'})))
     (app/'frontend').mkdir()
-    (app/'frontend'/'package.json').write_text(json.dumps({'name':'priv-fe', 'version':'0.0.0', 'private':True,
-        'scripts':{'build': 'node -e "require(\'node:fs\').writeFileSync(\'built.txt\', \'ok\')"'}}))
+    (app/'frontend'/'package.json').write_text(json.dumps(dict(name='priv-fe', version='0.0.0', private=True,
+        scripts={'build': 'node -e "require(\'node:fs\').writeFileSync(\'built.txt\', \'ok\')"'})))
     _write_cached_vp_shared(tmp_path)
     core._sync_ws_pnpm_workspace(tmp_path, core._js_dirs(tmp_path))
     core._sync_ws_package_json(tmp_path)
@@ -264,7 +261,7 @@ default-filter = "rdeps(optional)"
     r = run_tests([a, b], profiles=('one', 'two'))
     tests = {s.name: s.tests for s in r.suites if s.tests}
     assert not r.ok and tests == {'a one: unittests src/lib.rs': {'t::passes': 'ok'}, 'a one: tests/more.rs': {'other': 'ok'},
-                                  'b one: tests/fine.rs': {'fine': 'ok'}, 'a two: unittests src/lib.rs': {'t::fails': 'FAILED'}}, r.text
+        'b one: tests/fine.rs': {'fine': 'ok'}, 'a two: unittests src/lib.rs': {'t::fails': 'FAILED'}}, r.text
     first = run_tests([a, b], profiles=('two', 'one'))
     assert not first.ok and {s.name for s in first.suites if s.tests} == {'a two: unittests src/lib.rs'}
 

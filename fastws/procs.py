@@ -25,7 +25,7 @@ def bounded(
     env = kwargs.pop('env', None)
     env = dict(os.environ if env is None else env) | {JOB_ENV: '1'}
     with subprocess.Popen(cmd, stdin=None if input is None else subprocess.PIPE, stdout=subprocess.PIPE,
-                          stderr=subprocess.STDOUT if merge else subprocess.PIPE, text=True, start_new_session=owner, env=env, **kwargs) as p:
+        stderr=subprocess.STDOUT if merge else subprocess.PIPE, text=True, start_new_session=owner, env=env, **kwargs) as p:
         try:
             try: out, err = p.communicate(input, timeout=seconds)
             except BaseException as e:
@@ -36,7 +36,7 @@ def bounded(
                     p.kill()
                     p.wait()
                     out, err = (s.decode(errors='replace') if isinstance(s, bytes) else s or ''
-                                for s in (getattr(e, 'output', ''), getattr(e, 'stderr', '')))
+                        for s in (getattr(e, 'output', ''), getattr(e, 'stderr', '')))
                 if not isinstance(e, subprocess.TimeoutExpired): raise
                 tail = '\n'.join(f'    {line}' for line in (out + (err or '')).splitlines()[-20:])
                 cleanup = 'its process group was killed' if owner else 'its child was killed; the job owner must clean up descendants'
