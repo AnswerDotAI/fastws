@@ -1,5 +1,12 @@
 <!-- do not remove -->
 
+## 0.0.39
+
+### New Features
+
+- Support bin-only maturin crates in cargo develop and `build_backend`, run cargo update weekly, and remove fastws-cargo-key ([#68](https://github.com/AnswerDotAI/fastws/issues/68))
+
+
 ## 0.0.38
 
 ### New Features
