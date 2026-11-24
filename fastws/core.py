@@ -1251,6 +1251,14 @@ def _js_dirs(root: Path, repos_file="repos.txt") -> list[Path]:
             else: res.append(spec[1])
     return list(dict.fromkeys(d.resolve() for d in res if ok(d) and d.resolve() not in superseded_wasm))
 
+_VP_AGE_EXCLUDES = (
+    ("vite-plus", ("vite-plus", "@voidzero-dev/vite-plus-*")),
+    ("vitest", ("vitest", "@vitest/*")),
+    ("oxlint", ("oxlint", "@oxlint/*")),
+    ("oxfmt", ("oxfmt", "@oxfmt/*")),
+    ("tsrs", ("tsrs", "@tsrs/*")),
+)
+
 def _sync_ws_pnpm_workspace(root: Path, members: list[Path], toolchain: dict[str, str] = None) -> tuple[list[str], list[str]]:
     "Generate/update `pnpm-workspace.yaml`, applying Vite+ toolchain overrides and merging `pnpm-workspace.shared.yaml`; return `(added, removed)` packages."
     path = root/"pnpm-workspace.yaml"
@@ -1275,6 +1283,10 @@ def _sync_ws_pnpm_workspace(root: Path, members: list[Path], toolchain: dict[str
             else: ov.pop("vitest@*", None)
         if ov: data["overrides"] = ov
     if shared_data: _merge_shared(data, shared_data)
+    if toolchain and data.get("minimumReleaseAge"):
+        ex = [p for k, pats in _VP_AGE_EXCLUDES if toolchain.get(k) for p in pats]
+        if toolchain.get("vite-plus-core") and "@voidzero-dev/vite-plus-*" not in ex: ex.append("@voidzero-dev/vite-plus-core")
+        if ex: data["minimumReleaseAgeExclude"] = ex + [e for e in (data.get("minimumReleaseAgeExclude") or []) if e not in ex]
     cur_after = list(data.get("packages") or [])
     kept = [e for e in cur_after if any(c in e for c in "*?[") or not (root/e).resolve().is_relative_to(root.resolve())]
     new = kept + [e for e in (_rel_ws_path(root, d) for d in members) if e not in kept]

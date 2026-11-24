@@ -212,9 +212,10 @@ def test_sync_ws_pnpm_workspace_and_package_json(tmp_path):
     core._sync_ws_pnpm_workspace(tmp_path, [tmp_path/'app'], toolchain=tc)
     assert core._yaml_load(ws)['overrides'] == {'keep': '1.0.0', 'vite@*': 'npm:@voidzero-dev/vite-plus-core@8.4.0', 'vitest@*': '5.2.0'}
 
-    ws_shared.write_text('allowBuilds:\n  esbuild: true\noverrides:\n  vite: npm:@voidzero-dev/vite-plus-core@8.3.8000\n  vitest: 5.1.0\n')
+    ws_shared.write_text('allowBuilds:\n  esbuild: true\nminimumReleaseAgeExclude:\n  - custom-pkg\noverrides:\n  vite: npm:@voidzero-dev/vite-plus-core@8.3.8000\n  vitest: 5.1.0\n')
     core._sync_ws_pnpm_workspace(tmp_path, [tmp_path/'app'], toolchain=tc)
     assert core._yaml_load(ws)['overrides'] == dict(keep='1.0.0', vite='npm:@voidzero-dev/vite-plus-core@8.3.8000', vitest='5.1.0')
+    assert core._yaml_load(ws)['minimumReleaseAgeExclude'] == ['vite-plus', '@voidzero-dev/vite-plus-*', 'vitest', '@vitest/*', 'custom-pkg']
 
     pkg, pkg_shared = tmp_path/'package.json', tmp_path/'package.json.shared'
     pkg.write_text(json.dumps(dict(name='local', workspaces=['stale'], devDependencies={'keep': '1'})))
