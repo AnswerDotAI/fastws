@@ -1,5 +1,13 @@
 <!-- do not remove -->
 
+## 0.0.42
+
+### New Features
+
+- Default `cargo develop` and `cargo test` profile to `release`, add `--zig`/`--manylinux` support to `cargo stage` and `build_backend`, and pass `CARGO_INCREMENTAL=0` on clean repos during `ws-sync`
+- Exclude Vite+ toolchain packages from pnpm minimumReleaseAge ([#71](https://github.com/AnswerDotAI/fastws/issues/71))
+
+
 ## 0.0.41
 
 ### New Features
