@@ -20,9 +20,12 @@ def _stage(config_settings, default_profile='release'):
     parser.add_argument('--features', '-F', action='append')
     parser.add_argument('--all-features', action='store_true')
     parser.add_argument('--no-default-features', action='store_true')
+    parser.add_argument('--zig', action='store_true')
+    parser.add_argument('--manylinux', '--compatibility')
     args, _ = parser.parse_known_args(maturin.get_maturin_pep517_args(config_settings))
     profile = args.profile or ('release' if args.release else tool['maturin'].get('profile', default_profile))
-    stage_binaries(root, profile, args.target, args.features, args.all_features, args.no_default_features)
+    stage_binaries(root, profile, args.target, args.features, args.all_features, args.no_default_features,
+        zig=args.zig, manylinux=args.manylinux)
 
 
 def build_wheel(wheel_directory, config_settings=None, metadata_directory=None):

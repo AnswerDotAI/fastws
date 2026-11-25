@@ -705,7 +705,7 @@ def _cli_errors():
 def cargo_develop(
     command: str = 'develop', # Subcommand name supplied by Cargo
     path: str = '.', # Rust/Python project directory
-    profile: str = None, # Cargo profile; default: tool.fastws.dev-profile, or test
+    profile: str = None, # Cargo profile; default: tool.fastws.dev-profile, or release
 ):
     r"Build and install a mixed Rust/Python project's extension and opted-in binaries."
     from .cargo import develop
@@ -720,12 +720,14 @@ def cargo_stage(
     features: str = '', # Space or comma separated Cargo features
     all_features: bool = False, # Enable all Cargo features
     no_default_features: bool = False, # Disable default Cargo features
+    zig: bool = False, # Build via `cargo zigbuild` for Linux glibc targeting
+    manylinux: str = '', # Target glibc version for `--zig`, e.g. `2_31` or `manylinux_2_31`
 ):
     r"Stage Python-free native binaries for maturin wheel builds."
     from .cargo import stage_binaries
     with _cli_errors():
         for dest in stage_binaries(Path(path).resolve(), profile or None, target or None, features,
-            all_features, no_default_features): print(f'Staged {dest}')
+            all_features, no_default_features, zig=zig, manylinux=manylinux or None): print(f'Staged {dest}')
 
 def _newest(paths):
     "Newest file mtime among `paths`, walking each directory as `_src_mtime` does"
@@ -1349,11 +1351,17 @@ def _vp_toolchain() -> dict[str, str]:
     raw = subprocess.run(["vp", "toolchain", "--json", "-g"], capture_output=True, text=True, check=True).stdout
     return {n["id"]: n["version"] for n in json.loads(raw).get("nodes", []) if "id" in n and "version" in n}
 
-def _build_wasm(repo: Path):
+def _sync_cargo_env(repo: Path) -> dict[str, str] | None:
+    "Disable Cargo incremental compilation for clean repos during sync so sccache can cache workspace crates."
+    if "CARGO_INCREMENTAL" in os.environ: return None
+    g = Git(repo)
+    return {"CARGO_INCREMENTAL": "0"} if g.exists and g.status("--porcelain") == "" else None
+
+def _build_wasm(repo: Path, env: dict = None):
     "Run `cargo wasm` in `repo` through the workspace's configured Cargo."
     from .cargo import _cargo_command
-    cmd, env = _cargo_command("wasm")
-    subprocess.run(cmd, cwd=repo, env=env, check=True)
+    cmd, cmd_env = _cargo_command("wasm", env=env)
+    subprocess.run(cmd, cwd=repo, env=cmd_env, check=True)
 
 def _run_quiet(cmd: list[str], cwd: Path):
     "Run `cmd`, hiding routine output on success and printing captured output to stderr on failure."
@@ -1445,15 +1453,16 @@ async def ws_sync(
         native = [d.resolve() for _,d in projects if _is_maturin_native(d)]
         post_js = [d for d in native if _is_bin_with_js(d)]
         pre_js = [d for d in native if d not in post_js]
+        sync_develop = lambda d: develop(d, env=_sync_cargo_env(d))
         if pre_js:
-            with ThreadPoolExecutor(max_workers=build_workers) as ex: list(ex.map(develop, pre_js))
+            with ThreadPoolExecutor(max_workers=build_workers) as ex: list(ex.map(sync_develop, pre_js))
         if wasm_pkgs:
-            with ThreadPoolExecutor(max_workers=build_workers) as ex: list(ex.map(_build_wasm, wasm_pkgs))
+            with ThreadPoolExecutor(max_workers=build_workers) as ex: list(ex.map(lambda d: _build_wasm(d, env=_sync_cargo_env(d)), wasm_pkgs))
         if up: _upgrade_stamp(root).touch()
         if cargo_up: _upgrade_stamp(root, "fastws-cargo-upgraded").touch()
         if js_members: _sync_js(root, build_workers)
         if post_js:
-            with ThreadPoolExecutor(max_workers=build_workers) as ex: list(ex.map(develop, post_js))
+            with ThreadPoolExecutor(max_workers=build_workers) as ex: list(ex.map(sync_develop, post_js))
 
 @call_parse
 async def ws_add(

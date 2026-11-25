@@ -1,5 +1,5 @@
 import json, shutil, subprocess, tarfile, pytest, fastws.core as core
-from fastws.cargo import build, check, run_tests, Suite
+from fastws.cargo import build, check, run_tests, Suite, _zig_target
 from pathlib import Path
 
 
@@ -275,3 +275,12 @@ def test_captured_test_output():
         lines.append(f'test result: {"FAILED" if failed else "ok"}. 1 passed; {int(failed)} failed; 0 ignored')
         s = Suite.read('unit', lines, int(failed))
         assert s.failures == ({'fails': 'broken'} if failed else {}) and 'printed' in s.output
+
+
+def test_zig_target():
+    t = 'x86_64-unknown-linux-gnu'
+    assert _zig_target(t, '2_31') == _zig_target(t, '2.31') == _zig_target(t, 'manylinux_2_31') == f'{t}.2.31'
+    assert _zig_target(t, 'manylinux2014') == f'{t}.2.17'
+    assert _zig_target(f'{t}.2.17', '2_31') == f'{t}.2.17'
+    assert _zig_target('aarch64-apple-darwin', '2_31') == 'aarch64-apple-darwin'
+    assert _zig_target(t, 'off') == _zig_target(t, 'auto') == _zig_target(t, 'musllinux_1_2') == t

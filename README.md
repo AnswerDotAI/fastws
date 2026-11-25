@@ -199,7 +199,7 @@ cargo develop --path /path/to/project
 cargo develop --profile quick
 ```
 
-Run from the project root, or give its directory with `--path`. The command reads `python-source`, `module-name`, `manifest-path`, `bindings` and features from `[tool.maturin]`. `[tool.fastws] dev-profile = "quick"` selects a project's default for both `cargo develop` and `fastws.cargo.run_tests`. Without that setting they use `test`. An explicit `--profile NAME` overrides the project default. Mixed projects must produce a `cdylib` and set `python-source`; `bindings = "bin"` projects build and install their binary targets directly into the active venv. Define the selected profile in `Cargo.toml` and keep incremental compilation enabled for the local crate.
+Run from the project root, or give its directory with `--path`. The command reads `python-source`, `module-name`, `manifest-path`, `bindings` and features from `[tool.maturin]`. `[tool.fastws] dev-profile = "quick"` selects a project's default for both `cargo develop` and `fastws.cargo.run_tests`. Without that setting they use `release`. An explicit `--profile NAME` overrides the project default. Mixed projects must produce a `cdylib` and set `python-source`; `bindings = "bin"` projects build and install their binary targets directly into the active venv. Define the selected profile in `Cargo.toml` and keep incremental compilation enabled for the local crate.
 
 The workspace's `[tool.fastws] cargo = "/path/to/cargo"` optionally selects one explicit Cargo executable for fastws builds, checks, metadata and tests, including nextest's subordinate Cargo calls. A missing executable fails without falling back. With no selection, subprocess uses its normal PATH and working-directory rules. Upstream Cargo stays installed and usable; manifests, profiles, features and package selection are unchanged.
 
@@ -238,7 +238,7 @@ cargo stage --profile dist
 maturin build --profile dist
 ```
 
-Pass the same target and feature flags to both commands, including `--no-default-features` when needed. Staging builds binaries only. On macOS it matches Maturin's linker flags through `build.rustflags` or existing `RUSTFLAGS`/`CARGO_ENCODED_RUSTFLAGS`. A macOS target with its own `rustflags` must include `-C link-arg=-undefined -C link-arg=dynamic_lookup` there. Shared crates are reused when the two builds resolve the same dependency features. Adding `--lib` to staging can select a different compilation profile under LTO.
+Pass the same target, feature, and Linux glibc flags (`--zig --manylinux 2_31`, `--no-default-features`) to both commands when needed. Staging builds binaries only. On macOS it matches Maturin's linker flags through `build.rustflags` or existing `RUSTFLAGS`/`CARGO_ENCODED_RUSTFLAGS`. A macOS target with its own `rustflags` must include `-C link-arg=-undefined -C link-arg=dynamic_lookup` there. Shared crates are reused when the two builds resolve the same dependency features. Adding `--lib` to staging can select a different compilation profile under LTO.
 
 ### `cargo wait`
 
@@ -259,7 +259,7 @@ Where a root has `.config/nextest.toml`, preparation uses `cargo nextest list` t
 
 `root` can also be a list of roots, which build one after another. Roots without nextest then run their binaries in turn. Each profile then runs at the same time in every root whose config defines it: tests in different roots share a phase, and no phase starts before the previous one ends. Suite names start with the root's directory name, and with several profiles also with the profile, as in `app timed: tests/speed.rs`. A failure ends the run after its profile unless `--no-fail-fast` is given.
 
-The default profile is `[tool.fastws].dev-profile`, or `test` when unset. Explicit `--profile NAME`, `--profile=NAME`, `--release` and `-r` override it. Pass Cargo build/selection options positionally, and test filters and harness options in `test_args`. A failed binary stops the run unless `--no-fail-fast` is given. Results contain compiler diagnostics and each binary's outcomes and captured failures.
+The default profile is `[tool.fastws].dev-profile`, or `release` when unset. Explicit `--profile NAME`, `--profile=NAME`, `--release` and `-r` override it. Pass Cargo build/selection options positionally, and test filters and harness options in `test_args`. A failed binary stops the run unless `--no-fail-fast` is given. Results contain compiler diagnostics and each binary's outcomes and captured failures.
 
 ```python
 from fastws.cargo import run_tests
@@ -336,7 +336,7 @@ Before `uv sync`, fastws regenerates `tool.uv.no-build-isolation-package` and `[
 
 After `uv sync`, fastws writes `_fastws_pytest.pth` into the workspace venv's `site-packages` to default `PYTEST_DISABLE_PLUGIN_AUTOLOAD=1`, keeping pytest plugins installed for one repo from leaking into others. Repos enable the plugins they need via `-p` in `addopts` (override for a run with `PYTEST_DISABLE_PLUGIN_AUTOLOAD=""`).
 
-After `uv sync`, fastws runs `cargo develop` in mixed Rust/Python projects and `bindings = "bin"` Rust CLI projects without a `package.json`, with up to one project per CPU building concurrently by default. Cargo skips unchanged compilation inputs. Projects using `fastws.build_backend` should keep only packaging inputs in `tool.uv.cache-keys`; Rust source changes are handled by Cargo.
+After `uv sync`, fastws runs `cargo develop` in mixed Rust/Python projects and `bindings = "bin"` Rust CLI projects without a `package.json`, with up to one project per CPU building concurrently by default. For clean Git checkouts, sync sets `CARGO_INCREMENTAL=0` on `cargo develop` and `cargo wasm` (unless `CARGO_INCREMENTAL` is already set) so `sccache` caches workspace crates; dirty checkouts keep each repo's configured incremental setting. Cargo skips unchanged compilation inputs. Projects using `fastws.build_backend` should keep only packaging inputs in `tool.uv.cache-keys`; Rust source changes are handled by Cargo.
 
 Strictly after `cargo develop` finishes, fastws runs `cargo wasm` in parallel for every repo declaring `[tool.fastws].wasm-package`, so any `post-develop-module` generators have already produced their assets and each generated `wasm/pkg/package.json` exists before JavaScript installation.
 

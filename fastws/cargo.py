@@ -20,7 +20,7 @@ def settings(root):
     return tomllib.loads((Path(root).expanduser()/'pyproject.toml').read_text()).get('tool', {})
 
 
-def _dev_profile(root): return settings(root).get('fastws', {}).get('dev-profile', 'test') if (root/'pyproject.toml').exists() else 'test'
+def _dev_profile(root): return settings(root).get('fastws', {}).get('dev-profile', 'release') if (root/'pyproject.toml').exists() else 'release'
 
 
 def _cargo_command(*args, env=None):
@@ -247,7 +247,7 @@ def run_tests(
     timeout:float=30, # Seconds that each native test binary, or each nextest run of one profile in one root, may take after building; None: no limit
     profiles:tuple=('default',) # The nextest profiles to run in turn, each at once in every root whose `.config/nextest.toml` defines it
 )->Results:
-    "Build native tests once per root, with no time limit, then run Cargo's reported executables directly from their package directories. Where a root has `.config/nextest.toml`, `cargo nextest run` runs them instead, each test in its own process, once for each of `profiles` that its config defines, and each binary's results come from nextest's JUnit report. Several roots build in turn. Roots without nextest then run in turn, and each profile then runs in every root that defines it at once. Without `--no-fail-fast`, a failure ends the run after its binary, or after its profile. With several roots, each suite's name starts with its root's directory name, and with several profiles, with the profile. Source edits after building cannot trigger another build; results describe the compiled build, not the latest working tree. `timeout` bounds each binary, or each root's run of a profile, excluding compilation. Outside `FASTWS_JOB`, a run that runs out of time is reported as a failed suite with `timed_out` set. Inside a marked job, the timeout raises so its owner can clean up descendants. An omitted Cargo profile uses each root's tool.fastws.dev-profile, or test. Doctests are not run. This takes no timing lock: rustc's wrapper and tests that time own their holds."
+    "Build native tests once per root, with no time limit, then run Cargo's reported executables directly from their package directories. Where a root has `.config/nextest.toml`, `cargo nextest run` runs them instead, each test in its own process, once for each of `profiles` that its config defines, and each binary's results come from nextest's JUnit report. Several roots build in turn. Roots without nextest then run in turn, and each profile then runs in every root that defines it at once. Without `--no-fail-fast`, a failure ends the run after its binary, or after its profile. With several roots, each suite's name starts with its root's directory name, and with several profiles, with the profile. Source edits after building cannot trigger another build; results describe the compiled build, not the latest working tree. `timeout` bounds each binary, or each root's run of a profile, excluding compilation. Outside `FASTWS_JOB`, a run that runs out of time is reported as a failed suite with `timed_out` set. Inside a marked job, the timeout raises so its owner can clean up descendants. An omitted Cargo profile uses each root's tool.fastws.dev-profile, or release. Doctests are not run. This takes no timing lock: rustc's wrapper and tests that time own their holds."
     roots = [Path(r).expanduser().resolve() for r in (root if isinstance(root, (list, tuple)) else [root])]
     env = {'CARGO_TERM_QUIET': 'false', 'CARGO_TERM_COLOR': 'never'} | (env or {})
     has_profile = any(a in ('-r', '--release', '--profile') or isinstance(a, str) and a.startswith('--profile=') for a in args)
@@ -318,6 +318,30 @@ def _maturin_flags(target, env):
         if flag not in flags and '-C'+flag not in flags: flags += ['-C', flag]
     return [], dict(env, CARGO_ENCODED_RUSTFLAGS='\x1f'.join(flags))
 
+_MANYLINUX_ALIASES = {'manylinux2014': '2.17', 'manylinux2010': '2.12', 'manylinux1': '2.5'}
+
+
+def _glibc_version(manylinux):
+    if not manylinux: return None
+    s = str(manylinux).strip().lower()
+    if s in ('off', 'linux', 'auto'): return None
+    if s in _MANYLINUX_ALIASES: return _MANYLINUX_ALIASES[s]
+    m = re.fullmatch(r'(?:manylinux_)?(\d+)[_.](\d+)', s)
+    return f'{m[1]}.{m[2]}' if m else None
+
+
+def _host_triple(env=None):
+    out = subprocess.run(['rustc', '-vV'], capture_output=True, text=True, check=True, env=env).stdout
+    return next(l.split(':', 1)[1].strip() for l in out.splitlines() if l.startswith('host:'))
+
+
+def _zig_target(target, manylinux, env=None):
+    t = target or (env or {}).get('CARGO_BUILD_TARGET')
+    glibc = _glibc_version(manylinux)
+    if not glibc: return t
+    if not t: t = _host_triple(env)
+    return f'{t}.{glibc}' if '-linux-gnu' in t and not re.search(r'\.\d+\.\d+$', t) else t
+
 
 def build(
     root, # The project directory, whose `tool.maturin` gives the defaults (expands `~`)
@@ -330,11 +354,16 @@ def build(
     all_features=False, # Enable every feature? `tool.maturin`'s `all-features` also turns this on
     no_default_features=False, # Leave out the default features? `tool.maturin`'s `no-default-features` also turns this on
     for_maturin=False, # Use the macOS linker flags that maturin's own wheel build uses?
+    env=None, # Extra environment variables for Cargo
+    zig=False, # Build via `cargo zigbuild` for Linux glibc targeting?
+    manylinux=None, # Target glibc version for `zig`, e.g. `'2_31'` or `'manylinux_2_31'`
 ):
     "Build with Cargo and return the compiler artifacts of the workspace's packages."
     root = Path(root).expanduser()
     cfg = settings(root)['maturin']
-    cmd = ['build', '--manifest-path', str((root/'Cargo.toml').resolve()), '--message-format=json-diagnostic-short']
+    base_env = os.environ | (env or {})
+    if zig: target = _zig_target(target, manylinux, base_env)
+    cmd = ['zigbuild' if zig else 'build', '--manifest-path', str((root/'Cargo.toml').resolve()), '--message-format=json-diagnostic-short']
     if library: cmd.append('--lib')
     if binaries: cmd.append('--bins')
     if profile := profile or cfg.get('profile'): cmd += ['--profile', profile]
@@ -342,8 +371,8 @@ def build(
     if features := features or cfg.get('features'): cmd += ['--features', features if isinstance(features, str) else ','.join(features)]
     for flag, active in [('all-features', all_features), ('no-default-features', no_default_features)]:
         if active or cfg.get(flag): cmd.append('--' + flag)
-    extra, env = _maturin_flags(target, os.environ) if for_maturin else ([], None)
-    cmd, env = _cargo_command(*cmd, *extra, env=env)
+    extra, maturin_env = _maturin_flags(target, base_env) if for_maturin else ([], None)
+    cmd, env = _cargo_command(*cmd, *extra, env=maturin_env or env)
     result = subprocess.run(cmd, cwd=root, stdout=subprocess.PIPE, text=True, env=env)
     if log := env.get('FASTWS_CARGO_LOG'):
         with Path(log).expanduser().open('a') as capture: capture.write(result.stdout)
@@ -366,8 +395,8 @@ def replace(source, destination):
     return destination
 
 
-def develop(root, *, profile=None):
-    "Serialize this project's cooperating develop runs through build, artifact capture, installation, generator and wheel data. An omitted profile uses tool.fastws.dev-profile, or test. Raw Cargo commands do not take this lock."
+def develop(root, *, profile=None, env=None):
+    "Serialize this project's cooperating develop runs through build, artifact capture, installation, generator and wheel data. An omitted profile uses tool.fastws.dev-profile, or release. Raw Cargo commands do not take this lock."
     root = Path(root).expanduser()
     with store.building(root) as started:
         tool = settings(root)
@@ -375,7 +404,7 @@ def develop(root, *, profile=None):
         bin_only = cfg.get('bindings') == 'bin'
         if not bin_only and 'python-source' not in cfg: raise ConfigError(r'cargo develop requires tool.maturin.python-source')
         binaries = bin_only or tool.get('fastws', {}).get('native-binaries', False)
-        artifacts = build(root, library=not bin_only, binaries=binaries, profile=profile or _dev_profile(root))
+        artifacts = build(root, library=not bin_only, binaries=binaries, profile=profile or _dev_profile(root), env=env)
         env = Path(os.environ.get('VIRTUAL_ENV', sys.prefix))
         scripts = env/('Scripts' if os.name == 'nt' else 'bin')
         exes = [Path(m['executable']) for m in artifacts if binaries and m.get('executable')]
@@ -407,13 +436,14 @@ def develop(root, *, profile=None):
                 if f.is_file(): replace(f, env/f.relative_to(data))
 
 
-def stage_binaries(root, profile=None, target=None, features=None, all_features=False, no_default_features=False):
+def stage_binaries(root, profile=None, target=None, features=None, all_features=False, no_default_features=False,
+    zig=False, manylinux=None):
     "Stage Python-free Cargo binaries for a maturin wheel build."
     root = Path(root).expanduser()
     cfg = settings(root)['maturin']
     if 'data' not in cfg: raise ConfigError(r'staging native binaries requires tool.maturin.data')
     dest = root/cfg['data']/'scripts'
     artifacts = build(root, library=False, binaries=True, profile=profile, target=target, features=features,
-        all_features=all_features, no_default_features=no_default_features, for_maturin=True)
+        all_features=all_features, no_default_features=no_default_features, for_maturin=True, zig=zig, manylinux=manylinux)
     if dest.exists(): shutil.rmtree(dest)
     return [replace(m['executable'], dest/Path(m['executable']).name) for m in artifacts if m.get('executable')]
